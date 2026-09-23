@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halal Crypto Scanner</title>
+<style>
+:root{--bg:#080b10;--panel:#0e131b;--line:#1d2633;--text:#eef2f7;--muted:#8995a5;--good:#57d38c;--warn:#f2c45c;--bad:#ff6b6b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,Segoe UI,sans-serif}header{padding:22px 24px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:15px}h1{font-size:18px;margin:0;letter-spacing:.08em}.live{color:var(--good)}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor;margin-right:7px}.wrap{max-width:1200px;margin:auto;padding:20px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px}.card{padding:14px}.label{color:var(--muted);font-size:12px}.value{font-size:22px;font-weight:700;margin-top:5px}.controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.btn{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;cursor:pointer}.btn.active{border-color:var(--good);color:var(--good)}.table-wrap{overflow:auto}.panel{overflow:hidden}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:12px;font-weight:500}.sym{font-weight:700}.badge{display:inline-block;border-radius:5px;padding:4px 7px;font-size:11px}.BREAKOUT{color:#74e7a5;background:#153324}.MOMENTUM{color:#75c7ff;background:#102b3c}.TREND{color:#c5a6ff;background:#24183b}.WATCH{color:var(--warn);background:#332a14}.NOSETUP{color:var(--muted);background:#171c24}.score{font-weight:700}.muted{color:var(--muted)}.reason{font-size:12px;color:var(--muted);line-height:1.6}.empty{text-align:center;padding:50px;color:var(--muted)}@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header><h1>HALAL CRYPTO SCANNER</h1><div id="live" class="live"><span class="dot"></span>AUTOMATED</div></header>
+<div class="wrap">
+  <div class="cards">
+    <div class="card"><div class="label">Selected timeframe</div><div class="value" id="selected">1h</div></div>
+    <div class="card"><div class="label">Last scan</div><div class="value" id="lastScan">—</div></div>
+    <div class="card"><div class="label">Coins / failures</div><div class="value" id="coverage">—</div></div>
+    <div class="card"><div class="label">Telegram</div><div class="value" id="telegram">—</div></div>
+  </div>
+  <div class="controls" id="timeframes"></div>
+  <div class="controls" id="filters">
+    <button class="btn active" data-filter="ALL">All</button>
+    <button class="btn" data-filter="BREAKOUT">Breakout</button>
+    <button class="btn" data-filter="MOMENTUM">Momentum</button>
+    <button class="btn" data-filter="TREND">Trend</button>
+    <button class="btn" data-filter="WATCH">Watch</button>
+  </div>
+  <div class="panel table-wrap"><table><thead><tr><th>Coin</th><th>Price</th><th>Setup</th><th>Score</th><th>RSI</th><th>Volume</th><th>Why</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty">Waiting for the automated scanner…</div></div>
+</div>
+<script>
+const TF=['5m','15m','1h','4h'];let tf='1h',filter='ALL',results=[];
+const $=id=>document.getElementById(id);
+function fmtPrice(v){if(v>=1000)return v.toLocaleString(undefined,{maximumFractionDigits:2});if(v>=1)return v.toFixed(4);return v.toFixed(8).replace(/0+$/,'').replace(/\.$/,'')}
+function fmtTime(ts){return ts?new Date(ts*1000).toLocaleTimeString(): '—'}
+function renderTF(){ $('timeframes').innerHTML=TF.map(x=>`<button class="btn ${x===tf?'active':''}" data-tf="${x}">${x}</button>`).join('');document.querySelectorAll('[data-tf]').forEach(b=>b.onclick=()=>{tf=b.dataset.tf;$('selected').textContent=tf;renderTF();refresh()}) }
+function render(){const list=filter==='ALL'?results:results.filter(x=>x.setup_type===filter);$('rows').innerHTML=list.map(r=>`<tr><td class="sym">${r.symbol}</td><td>${fmtPrice(r.price)}</td><td><span class="badge ${r.setup_type}">${r.setup_type}</span></td><td class="score">${r.score}/100</td><td>${r.indicators?.rsi??'—'}</td><td>${r.indicators?.volume_ratio?`${r.indicators.volume_ratio}x`:'—'}</td><td class="reason">${(r.reasons||[]).slice(0,2).join(' · ')}</td></tr>`).join('');$('empty').style.display=list.length?'none':'block'}
+async function refresh(){try{const [r,s]=await Promise.all([fetch(`/api/results?timeframe=${tf}`),fetch('/api/status')]);const p=await r.json(),st=await s.json();results=p.results||[];render();$('selected').textContent=tf;$('lastScan').textContent=fmtTime(p.updated_at);$('coverage').textContent=`${p.successful_count??results.length} / ${p.failed_count??0}`;$('telegram').textContent=st.telegram_configured?'ON':'OFF';$('live').innerHTML='<span class="dot"></span>AUTOMATED'}catch(e){$('live').innerHTML='<span class="dot"></span>OFFLINE'}}
+document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.remove('active'));b.classList.add('active');render()});renderTF();refresh();setInterval(refresh,25000);
+</script>
+</body></html>

@@ -1,0 +1,32 @@
+"""Configuration for the autonomous Halal Crypto Scanner."""
+
+import os
+
+BINANCE_BASE_URL = os.environ.get(
+    "BINANCE_BASE_URL",
+    "https://data-api.binance.vision",
+)
+COINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coins.txt")
+CANDLE_LOOKBACK = int(os.environ.get("CANDLE_LOOKBACK", "220"))
+
+TIMEFRAMES = ["5m", "15m", "1h", "4h"]
+DEFAULT_TIMEFRAME = "1h"
+
+# Telegram
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+ALERT_SETUP_TYPES = {"BREAKOUT", "MOMENTUM"}
+ALERT_MIN_SCORE = int(os.environ.get("ALERT_MIN_SCORE", "70"))
+ALERT_COOLDOWN_MINUTES = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "240"))
+
+# Upstash Redis
+UPSTASH_REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+# Secret used by GitHub Actions to trigger scans.
+SCAN_SECRET = os.environ.get("SCAN_SECRET", "")
+
+
+def load_coins(path=COINS_FILE):
+    with open(path, encoding="utf-8") as f:
+        return [line.strip().upper() for line in f if line.strip()]
