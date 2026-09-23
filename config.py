@@ -15,9 +15,12 @@ DEFAULT_TIMEFRAME = "1h"
 # Telegram
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-ALERT_SETUP_TYPES = {"BREAKOUT", "MOMENTUM"}
-ALERT_MIN_SCORE = int(os.environ.get("ALERT_MIN_SCORE", "70"))
+ALERT_SETUP_TYPES = {"BREAKOUT", "MOMENTUM", "TREND", "PULLBACK", "SUPPORT_BOUNCE", "REVERSAL"}
+# Telegram is intentionally selective: only high-quality, multi-confirmed setups alert by default.
+ALERT_MIN_SCORE = int(os.environ.get("ALERT_MIN_SCORE", "80"))
+ALERT_MIN_VOLUME_RATIO = float(os.environ.get("ALERT_MIN_VOLUME_RATIO", "1.2"))
 ALERT_COOLDOWN_MINUTES = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "240"))
+ALERT_MAX_PER_SCAN = int(os.environ.get("ALERT_MAX_PER_SCAN", "10"))
 EMA_EQUAL_TOLERANCE_PCT = float(os.environ.get("EMA_EQUAL_TOLERANCE_PCT", "0.05"))
 ALERT_EMA_EQUAL = os.environ.get("ALERT_EMA_EQUAL", "1") == "1"
 BACKTEST_DEFAULT_LIMIT = int(os.environ.get("BACKTEST_DEFAULT_LIMIT", "500"))

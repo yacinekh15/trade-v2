@@ -8,7 +8,7 @@ def deps():
     try:
         from config import load_coins,TIMEFRAMES,DEFAULT_TIMEFRAME,CANDLE_LOOKBACK,SCAN_SECRET,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,BACKTEST_DEFAULT_LIMIT,BACKTEST_MAX_LIMIT
         from scanner import run_scan,combine_mtf
-        from telegram_alerts import check_and_alert
+        from telegram_alerts import check_and_alert, check_and_alert_mtf
         from upstash_client import get_json,set_json,configured as upstash_configured
         from binance_data import get_klines
         from backtest import backtest_candles
@@ -53,8 +53,9 @@ async def scan(timeframe:str=Query(None),secret:str=Query(""),x_scan_secret:str=
         for one in d["TIMEFRAMES"]:
             p=do_scan(one); payloads[one]=p; all_alerts.append(p["alerts"])
         combined=d["combine_mtf"](payloads)
-        d["set_json"]("results:all",{"status":"ok","updated_at":time.time(),"timeframes":d["TIMEFRAMES"],"results":combined,"alerts":all_alerts,"duration_seconds":round(time.time()-started,2)})
-        return {"ok":True,"timeframe":"all","num_results":len(combined),"alerts":all_alerts,"duration_seconds":round(time.time()-started,2)}
+        selective_alerts=d["check_and_alert_mtf"](payloads)
+        d["set_json"]("results:all",{"status":"ok","updated_at":time.time(),"timeframes":d["TIMEFRAMES"],"results":combined,"alerts":selective_alerts,"duration_seconds":round(time.time()-started,2)})
+        return {"ok":True,"timeframe":"all","num_results":len(combined),"alerts":selective_alerts,"duration_seconds":round(time.time()-started,2)}
     if tf not in d["TIMEFRAMES"]:raise HTTPException(400,f"timeframe must be one of {d['TIMEFRAMES']}")
     p=do_scan(tf); return {"ok":True,"timeframe":tf,"num_results":len(p["results"]),"failed_count":p["failed_count"],"duration_seconds":p["duration_seconds"],"alerts":p["alerts"]}
 
