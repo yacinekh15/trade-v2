@@ -1,0 +1,26 @@
+name: Manual halal scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeframe:
+        description: "Timeframe to scan"
+        required: true
+        default: "all"
+        type: choice
+        options: [all, 5m, 15m, 1h, 4h]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel scanner
+        env:
+          DOMAIN: ${{ secrets.VERCEL_APP_DOMAIN }}
+          SECRET: ${{ secrets.SCAN_SECRET }}
+          TIMEFRAME: ${{ inputs.timeframe }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 --max-time 55 \
+            -X POST "https://${DOMAIN}/api/scan?timeframe=${TIMEFRAME}" \
+            -H "X-Scan-Secret: ${SECRET}"
