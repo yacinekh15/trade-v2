@@ -1,130 +1,47 @@
-"""Telegram alerts with persistent deduplication in Upstash Redis."""
-
-import requests
-
-from config import (
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID,
-    ALERT_SETUP_TYPES,
-    ALERT_MIN_SCORE,
-    ALERT_COOLDOWN_MINUTES,
-)
+"""Telegram alerts with persistent deduplication."""
+import time, requests
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALERT_SETUP_TYPES, ALERT_MIN_SCORE, ALERT_COOLDOWN_MINUTES, ALERT_EMA_EQUAL
 from upstash_client import get_json, set_json
-
-ALERT_STATE_KEY = "alerted_state_v2"
-
+ALERT_STATE_KEY="alerted_state_v3"
 
 def send_message(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return False
     try:
-        resp = requests.post(url, data=payload, timeout=10)
-        resp.raise_for_status()
-        return True
-    except Exception as e:
-        print(f"[telegram] send failed: {e}")
-        return False
+        r=requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",data={"chat_id":TELEGRAM_CHAT_ID,"text":text,"parse_mode":"Markdown","disable_web_page_preview":True},timeout=10)
+        r.raise_for_status(); return True
+    except Exception as e: print(f"[telegram] send failed: {e}"); return False
 
+def _fmt(v):
+    v=float(v)
+    if v>=1000:return f"{v:,.2f}"
+    if v>=1:return f"{v:,.4f}"
+    return f"{v:.8f}".rstrip('0').rstrip('.')
 
-def _alert_key(timeframe, symbol):
-    return f"{timeframe}:{symbol}"
+def _levels(r):
+    p=float(r["price"]); atr=float(r["indicators"].get("atr") or 0); sup=float(r["indicators"].get("support") or p); res=float(r["indicators"].get("resistance") or p)
+    if atr<=0:return p,res,sup
+    return p,max(res,p+2*atr),max(0,min(sup,p-1.5*atr))
 
-
-def _trade_levels(result):
-    """Derive informational ATR-based levels for the Telegram message."""
-    price = float(result["price"])
-    atr = float(result["indicators"].get("atr") or 0)
-    resistance = float(result["indicators"].get("resistance") or price)
-    support = float(result["indicators"].get("support") or price)
-
-    if atr <= 0:
-        return price, resistance, support
-
-    # Informational levels only; execution is intentionally not automated.
-    entry = price
-    stop = min(support, price - 1.5 * atr)
-    target = max(resistance, price + 2.0 * atr)
-    if target <= entry:
-        target = entry + 2.0 * atr
-    if stop >= entry:
-        stop = max(0.0, entry - 1.5 * atr)
-    return entry, target, stop
-
-
-def _fmt_price(value):
-    if value >= 1000:
-        return f"{value:,.2f}"
-    if value >= 1:
-        return f"{value:,.4f}"
-    return f"{value:.8f}".rstrip("0").rstrip(".")
-
-
-def check_and_alert(results, timeframe):
-    """Alert only on a newly qualifying setup or after its cooldown."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return {"sent": 0, "skipped": 0, "configured": False}
-
-    now = __import__("time").time()
-    state = get_json(ALERT_STATE_KEY, default={}) or {}
-    changed = False
-    sent = 0
-    skipped = 0
-
-    for result in results:
-        symbol = result["symbol"]
-        key = _alert_key(timeframe, symbol)
-        qualifies = (
-            result["setup_type"] in ALERT_SETUP_TYPES
-            and result["score"] >= ALERT_MIN_SCORE
-        )
-
-        previous = state.get(key)
-        if not qualifies:
-            if previous is not None:
-                del state[key]
-                changed = True
+def check_and_alert(results,timeframe):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:return {"sent":0,"skipped":0,"configured":False}
+    now=time.time(); state=get_json(ALERT_STATE_KEY,default={}) or {}; sent=skipped=0; changed=False
+    for r in results:
+        symbol=r["symbol"]; setup=r["setup_type"]; key=f"{timeframe}:{symbol}:{setup}"
+        normal=setup in ALERT_SETUP_TYPES and r["score"]>=ALERT_MIN_SCORE
+        ema_event=ALERT_EMA_EQUAL and r.get("ema_equal",False)
+        if not normal and not ema_event:
             continue
-
-        setup = result["setup_type"]
-        recently_sent = (
-            isinstance(previous, dict)
-            and previous.get("setup_type") == setup
-            and now - float(previous.get("sent_at", 0))
-            < ALERT_COOLDOWN_MINUTES * 60
-        )
-        if recently_sent:
-            skipped += 1
-            continue
-
-        entry, target, stop = _trade_levels(result)
-        reasons = "\n".join(f"• {reason}" for reason in result["reasons"])
-        text = (
-            f"🚨 *{setup} — {symbol}*\n"
-            f"Timeframe: `{timeframe}`\n"
-            f"Score: *{result['score']}/100*\n\n"
-            f"Entry/reference: `{_fmt_price(entry)}`\n"
-            f"Target/reference: `{_fmt_price(target)}`\n"
-            f"Invalidation/reference: `{_fmt_price(stop)}`\n\n"
-            f"*Reasons*\n{reasons}\n\n"
-            f"RSI: `{result['indicators']['rsi']}` | "
-            f"Volume: `{result['indicators']['volume_ratio']}x`\n"
-            f"_Technical screening only — not an instruction to trade._"
-        )
-
+        kind="EMA_EQUAL" if ema_event and not normal else setup
+        k=f"{timeframe}:{symbol}:{kind}"; prev=state.get(k)
+        if isinstance(prev,dict) and now-float(prev.get("sent_at",0))<ALERT_COOLDOWN_MINUTES*60:
+            skipped+=1; continue
+        entry,target,stop=_levels(r); reasons="\n".join(f"• {x}" for x in r.get("reasons",[]))
+        title="EMA20 ≈ EMA50" if kind=="EMA_EQUAL" else f"{kind} — {symbol}"
+        text=(f"🔔 *{title}*\nSymbol: `{symbol}`\nTimeframe: `{timeframe}`\nScore: *{r['score']}/100*\n\n"
+              f"Entry/reference: `{_fmt(entry)}`\nTarget/reference: `{_fmt(target)}`\nInvalidation/reference: `{_fmt(stop)}`\n\n"
+              f"*Why*\n{reasons}\n\nRSI: `{r['indicators']['rsi']}` | EMA20: `{_fmt(r['indicators']['ema20'])}` | EMA50: `{_fmt(r['indicators']['ema50'])}`\n"
+              f"_Technical screening only — not an instruction to trade._")
         if send_message(text):
-            state[key] = {"setup_type": setup, "sent_at": now, "score": result["score"]}
-            changed = True
-            sent += 1
-
-    if changed:
-        set_json(ALERT_STATE_KEY, state)
-
-    return {"sent": sent, "skipped": skipped, "configured": True}
+            state[k]={"sent_at":now,"score":r["score"]}; changed=True; sent+=1
+    if changed:set_json(ALERT_STATE_KEY,state)
+    return {"sent":sent,"skipped":skipped,"configured":True}

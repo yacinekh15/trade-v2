@@ -1,33 +1,26 @@
-name: Autonomous crypto scanner
+name: Manual halal scanner
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
-
-concurrency:
-  group: halal-scanner
-  cancel-in-progress: false
+    inputs:
+      timeframe:
+        description: "Timeframe to scan"
+        required: true
+        default: "all"
+        type: choice
+        options: [all, 5m, 15m, 1h, 4h]
 
 jobs:
   scan:
-    name: Scan ${{ matrix.timeframe }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        timeframe: [5m, 15m, 1h, 4h]
-
     steps:
       - name: Trigger Vercel scanner
         env:
           DOMAIN: ${{ secrets.VERCEL_APP_DOMAIN }}
           SECRET: ${{ secrets.SCAN_SECRET }}
-          TIMEFRAME: ${{ matrix.timeframe }}
+          TIMEFRAME: ${{ inputs.timeframe }}
         run: |
           set -euo pipefail
-          curl --fail-with-body --silent --show-error \
-            --retry 3 --retry-delay 2 \
-            --max-time 55 \
+          curl --fail-with-body --silent --show-error --retry 3 --retry-delay 2 --max-time 55 \
             -X POST "https://${DOMAIN}/api/scan?timeframe=${TIMEFRAME}" \
             -H "X-Scan-Secret: ${SECRET}"

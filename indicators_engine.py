@@ -99,3 +99,30 @@ def compute_support_resistance(candles, lookback=20):
     resistance = max(c["high"] for c in window)
     support = min(c["low"] for c in window)
     return support, resistance
+
+
+def ema_relationship(ema20, ema50, tolerance_pct=0.05):
+    """Classify EMA20 vs EMA50; near-equal uses a configurable percentage band."""
+    if ema20 is None or ema50 in (None, 0):
+        return "UNKNOWN", None
+    gap_pct = abs(ema20 - ema50) / abs(ema50) * 100
+    if gap_pct <= tolerance_pct:
+        return "EQUAL", gap_pct
+    return ("BULLISH" if ema20 > ema50 else "BEARISH"), gap_pct
+
+
+def ema_crossed_up(series20, series50):
+    """True when EMA20 crossed from <= EMA50 to > EMA50 on the latest candle."""
+    if len(series20) < 2 or len(series50) < 2:
+        return False
+    a0, b0 = series20[-2], series50[-2]
+    a1, b1 = series20[-1], series50[-1]
+    return None not in (a0, b0, a1, b1) and a0 <= b0 and a1 > b1
+
+
+def ema_crossed_down(series20, series50):
+    if len(series20) < 2 or len(series50) < 2:
+        return False
+    a0, b0 = series20[-2], series50[-2]
+    a1, b1 = series20[-1], series50[-1]
+    return None not in (a0, b0, a1, b1) and a0 >= b0 and a1 < b1

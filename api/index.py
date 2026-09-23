@@ -1,206 +1,102 @@
-"""Vercel API for the autonomous Halal Crypto Scanner."""
+"""Vercel API for the manual Halal Crypto Scanner."""
+import os,sys,time,traceback
+ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,ROOT)
+from fastapi import FastAPI,Header,HTTPException,Query
+app=FastAPI(title="Halal Crypto Scanner API")
 
-import os
-import sys
-import time
-import traceback
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-
-from fastapi import FastAPI, Header, HTTPException, Query
-
-app = FastAPI(title="Halal Crypto Scanner API")
-
-
-def get_dependencies():
+def deps():
     try:
-        from config import (
-            load_coins,
-            TIMEFRAMES,
-            DEFAULT_TIMEFRAME,
-            CANDLE_LOOKBACK,
-            SCAN_SECRET,
-            TELEGRAM_BOT_TOKEN,
-            TELEGRAM_CHAT_ID,
-        )
-        from scanner import run_scan
+        from config import load_coins,TIMEFRAMES,DEFAULT_TIMEFRAME,CANDLE_LOOKBACK,SCAN_SECRET,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,BACKTEST_DEFAULT_LIMIT,BACKTEST_MAX_LIMIT
+        from scanner import run_scan,combine_mtf
         from telegram_alerts import check_and_alert
-        from upstash_client import get_json, set_json, configured as upstash_configured
-
+        from upstash_client import get_json,set_json,configured as upstash_configured
+        from binance_data import get_klines
+        from backtest import backtest_candles
         return locals()
     except Exception:
-        print("DEPENDENCY IMPORT ERROR:")
-        traceback.print_exc()
-        raise
+        traceback.print_exc(); raise
 
+def key(tf):return f"results:{tf}"
+def status_key(tf):return f"scan_status:{tf}"
+def _auth(d,secret,header):
+    expected=d["SCAN_SECRET"]; supplied=header or secret
+    if expected and supplied!=expected:raise HTTPException(401,"Invalid scan secret")
 
-def results_key(timeframe):
-    return f"results:{timeframe}"
-
-
-def status_key(timeframe):
-    return f"scan_status:{timeframe}"
-
-
-def _authorize(deps, secret, header_secret=""):
-    expected = deps["SCAN_SECRET"]
-    # If no secret is configured, keep local/manual use possible.
-    supplied = header_secret or secret
-    if expected and supplied != expected:
-        raise HTTPException(status_code=401, detail="Invalid scan secret")
-
-
-def do_scan(timeframe):
-    deps = get_dependencies()
-    started = time.time()
-    symbols = deps["load_coins"]()
-
-    results, failed = deps["run_scan"](
-        symbols,
-        timeframe,
-        deps["CANDLE_LOOKBACK"],
-    )
-
-    alert_info = deps["check_and_alert"](results, timeframe)
-    finished = time.time()
-
-    payload = {
-        "status": "ok" if not failed else "partial",
-        "timeframe": timeframe,
-        "updated_at": finished,
-        "duration_seconds": round(finished - started, 2),
-        "coin_count": len(symbols),
-        "successful_count": len(results),
-        "failed_count": len(failed),
-        "failed_samples": [
-            {"symbol": symbol, "error": error}
-            for symbol, error in failed[:10]
-        ],
-        "results": results,
-        "alerts": alert_info,
-    }
-
-    # Persist the complete result and lightweight status independently.
-    deps["set_json"](results_key(timeframe), payload)
-    deps["set_json"](
-        status_key(timeframe),
-        {
-            k: payload[k]
-            for k in (
-                "status",
-                "timeframe",
-                "updated_at",
-                "duration_seconds",
-                "coin_count",
-                "successful_count",
-                "failed_count",
-                "failed_samples",
-                "alerts",
-            )
-        },
-    )
-    return payload
-
+def do_scan(tf):
+    d=deps(); started=time.time(); symbols=d["load_coins"](); results,failed=d["run_scan"](symbols,tf,d["CANDLE_LOOKBACK"]); alerts=d["check_and_alert"](results,tf); finished=time.time()
+    payload={"status":"ok" if not failed else "partial","timeframe":tf,"updated_at":finished,"duration_seconds":round(finished-started,2),"coin_count":len(symbols),"successful_count":len(results),"failed_count":len(failed),"failed_samples":[{"symbol":s,"error":e} for s,e in failed[:10]],"results":results,"alerts":alerts}
+    d["set_json"](key(tf),payload); d["set_json"](status_key(tf),{k:payload[k] for k in ("status","timeframe","updated_at","duration_seconds","coin_count","successful_count","failed_count","failed_samples","alerts")}); return payload
 
 @app.get("/api/health")
 async def health():
-    deps = get_dependencies()
-    return {
-        "status": "ok",
-        "python": sys.version,
-        "upstash_configured": deps["upstash_configured"](),
-        "telegram_configured": bool(
-            deps["TELEGRAM_BOT_TOKEN"] and deps["TELEGRAM_CHAT_ID"]
-        ),
-        "timeframes": deps["TIMEFRAMES"],
-        "coins_file": len(deps["load_coins"]()),
-    }
-
+    d=deps(); return {"status":"ok","python":sys.version,"upstash_configured":d["upstash_configured"](),"telegram_configured":bool(d["TELEGRAM_BOT_TOKEN"] and d["TELEGRAM_CHAT_ID"]),"timeframes":d["TIMEFRAMES"],"coins_file":len(d["load_coins"]())}
 
 @app.get("/api/results")
-async def api_results(timeframe: str = None):
-    deps = get_dependencies()
-    timeframe = timeframe or deps["DEFAULT_TIMEFRAME"]
-
-    if timeframe not in deps["TIMEFRAMES"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"timeframe must be one of {deps['TIMEFRAMES']}",
-        )
-
-    cached = deps["get_json"](results_key(timeframe))
-    if cached is None:
-        return {
-            "status": "no_results",
-            "timeframe": timeframe,
-            "updated_at": None,
-            "results": [],
-            "failed_count": 0,
-            "message": "No scan has completed for this timeframe yet.",
-        }
-    return cached
-
+async def results(timeframe:str=None):
+    d=deps(); tf=timeframe or d["DEFAULT_TIMEFRAME"]
+    if tf == "all":
+        return d["get_json"]("results:all",default={"status":"no_results","timeframe":"all","results":[]})
+    if tf not in d["TIMEFRAMES"]:raise HTTPException(400,f"timeframe must be one of {d['TIMEFRAMES']}")
+    return d["get_json"](key(tf),default={"status":"no_results","timeframe":tf,"results":[],"failed_count":0})
 
 @app.get("/api/status")
-async def api_status(timeframe: str = None):
-    """Compact status for the selected timeframe; never includes secrets."""
-    deps = get_dependencies()
-    timeframe = timeframe or deps["DEFAULT_TIMEFRAME"]
-    if timeframe not in deps["TIMEFRAMES"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"timeframe must be one of {deps['TIMEFRAMES']}",
-        )
-    status = deps["get_json"](
-        status_key(timeframe),
-        default={"status": "never_run", "timeframe": timeframe},
-    )
-    return {
-        "status": "ok",
-        "server_time": time.time(),
-        "timeframe": timeframe,
-        "scan": status,
-        "telegram_configured": bool(
-            deps["TELEGRAM_BOT_TOKEN"] and deps["TELEGRAM_CHAT_ID"]
-        ),
-    }
-
+async def status(timeframe:str=None):
+    d=deps(); tf=timeframe or d["DEFAULT_TIMEFRAME"]
+    if tf not in d["TIMEFRAMES"]:raise HTTPException(400,f"timeframe must be one of {d['TIMEFRAMES']}")
+    return {"status":"ok","server_time":time.time(),"timeframe":tf,"scan":d["get_json"](status_key(tf),default={"status":"never_run","timeframe":tf}),"telegram_configured":bool(d["TELEGRAM_BOT_TOKEN"] and d["TELEGRAM_CHAT_ID"])}
 
 @app.post("/api/scan")
-async def api_scan(
-    timeframe: str = Query(default=None),
-    secret: str = Query(default=""),
-    x_scan_secret: str = Header(default="", alias="X-Scan-Secret"),
-):
-    deps = get_dependencies()
-    _authorize(deps, secret, x_scan_secret)
-    timeframe = timeframe or deps["DEFAULT_TIMEFRAME"]
+async def scan(timeframe:str=Query(None),secret:str=Query(""),x_scan_secret:str=Header("",alias="X-Scan-Secret")):
+    d=deps(); _auth(d,secret,x_scan_secret); tf=timeframe or d["DEFAULT_TIMEFRAME"]
+    if tf=="all":
+        payloads={}; all_alerts=[]; started=time.time()
+        for one in d["TIMEFRAMES"]:
+            p=do_scan(one); payloads[one]=p; all_alerts.append(p["alerts"])
+        combined=d["combine_mtf"](payloads)
+        d["set_json"]("results:all",{"status":"ok","updated_at":time.time(),"timeframes":d["TIMEFRAMES"],"results":combined,"alerts":all_alerts,"duration_seconds":round(time.time()-started,2)})
+        return {"ok":True,"timeframe":"all","num_results":len(combined),"alerts":all_alerts,"duration_seconds":round(time.time()-started,2)}
+    if tf not in d["TIMEFRAMES"]:raise HTTPException(400,f"timeframe must be one of {d['TIMEFRAMES']}")
+    p=do_scan(tf); return {"ok":True,"timeframe":tf,"num_results":len(p["results"]),"failed_count":p["failed_count"],"duration_seconds":p["duration_seconds"],"alerts":p["alerts"]}
 
-    if timeframe not in deps["TIMEFRAMES"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"timeframe must be one of {deps['TIMEFRAMES']}",
-        )
+@app.get("/api/candles")
+async def candles(symbol:str,timeframe:str="1h",limit:int=220):
+    d=deps(); symbol=symbol.upper().strip();
+    if timeframe not in d["TIMEFRAMES"]:raise HTTPException(400,"invalid timeframe")
+    limit=max(60,min(limit,1000))
+    try:return {"symbol":symbol,"timeframe":timeframe,"candles":d["get_klines"](symbol,timeframe,limit)}
+    except Exception as e:raise HTTPException(502,f"Market data error: {e}")
 
-    payload = do_scan(timeframe)
-    return {
-        "ok": True,
-        "timeframe": timeframe,
-        "num_results": len(payload["results"]),
-        "failed_count": payload["failed_count"],
-        "duration_seconds": payload["duration_seconds"],
-        "alerts": payload["alerts"],
-    }
+@app.post("/api/backtest")
+async def backtest(symbol:str,timeframe:str="1h",limit:int=None,min_score:int=70,max_hold:int=24):
+    d=deps(); symbol=symbol.upper().strip()
+    if timeframe not in d["TIMEFRAMES"]:raise HTTPException(400,"invalid timeframe")
+    limit=max(100,min(limit or d["BACKTEST_DEFAULT_LIMIT"],d["BACKTEST_MAX_LIMIT"]))
+    max_hold=max(1,min(max_hold,200)); min_score=max(0,min(min_score,100))
+    try:
+        candles=d["get_klines"](symbol,timeframe,limit); return d["backtest_candles"](symbol,candles,timeframe,min_score,max_hold)
+    except Exception as e:raise HTTPException(502,f"Backtest data error: {e}")
 
+from pydantic import BaseModel
+
+class PaperTrade(BaseModel):
+    symbol: str
+    timeframe: str = "1h"
+    entry: float
+    score: int = 0
+    note: str = ""
+
+@app.get("/api/paper-trades")
+async def paper_trades():
+    d=deps(); return {"trades": d["get_json"]("paper_trades", default=[]) or []}
+
+@app.post("/api/paper-trades")
+async def add_paper_trade(trade: PaperTrade):
+    d=deps(); rows=d["get_json"]("paper_trades", default=[]) or []
+    rows.insert(0,{"id":int(time.time()*1000),**trade.model_dump(),"created_at":time.time(),"status":"OPEN"})
+    rows=rows[:200]; d["set_json"]("paper_trades",rows); return {"ok":True,"trade":rows[0]}
 
 @app.post("/api/timeframe")
-async def set_timeframe(timeframe: str = Query(...)):
-    deps = get_dependencies()
-    if timeframe not in deps["TIMEFRAMES"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"timeframe must be one of {deps['TIMEFRAMES']}",
-        )
-    # Kept for dashboard/backward compatibility. Scans are now independent.
-    return {"ok": True, "current_timeframe": timeframe}
+async def set_timeframe(timeframe:str=Query(...)):
+    d=deps()
+    if timeframe not in d["TIMEFRAMES"]:raise HTTPException(400,"invalid timeframe")
+    return {"ok":True,"current_timeframe":timeframe}

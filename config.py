@@ -18,6 +18,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 ALERT_SETUP_TYPES = {"BREAKOUT", "MOMENTUM"}
 ALERT_MIN_SCORE = int(os.environ.get("ALERT_MIN_SCORE", "70"))
 ALERT_COOLDOWN_MINUTES = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "240"))
+EMA_EQUAL_TOLERANCE_PCT = float(os.environ.get("EMA_EQUAL_TOLERANCE_PCT", "0.05"))
+ALERT_EMA_EQUAL = os.environ.get("ALERT_EMA_EQUAL", "1") == "1"
+BACKTEST_DEFAULT_LIMIT = int(os.environ.get("BACKTEST_DEFAULT_LIMIT", "500"))
+BACKTEST_MAX_LIMIT = int(os.environ.get("BACKTEST_MAX_LIMIT", "1000"))
 
 # Upstash Redis
 UPSTASH_REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
