@@ -91,13 +91,15 @@ def _message(r, tf, by_tf):
     )
 
 
-def check_and_alert(results, timeframe):
+def check_and_alert(results, timeframe, enabled=True):
     # Single-timeframe scans intentionally do not send high-confidence alerts because
     # the selective Telegram policy requires higher-timeframe confirmation.
-    return {"sent": 0, "skipped": len(results), "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "reason": "MTF confirmation required; use ALL scan for Telegram alerts."}
+    return {"sent": 0, "skipped": len(results), "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": bool(enabled), "reason": "MTF confirmation required; use ALL scan for Telegram alerts."}
 
 
-def check_and_alert_mtf(scan_payloads):
+def check_and_alert_mtf(scan_payloads, enabled=True):
+    if not enabled:
+        return {"sent": 0, "skipped": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": False, "candidates": 0, "reason": "Telegram sending disabled by dashboard toggle."}
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return {"sent": 0, "skipped": 0, "configured": False, "candidates": 0}
     by_tf = {}
@@ -125,4 +127,4 @@ def check_and_alert_mtf(scan_payloads):
                 changed = True; sent += 1
     if changed:
         set_json(ALERT_STATE_KEY, state)
-    return {"sent": sent, "skipped": skipped, "configured": True, "candidates": candidates, "max_per_scan": ALERT_MAX_PER_SCAN}
+    return {"sent": sent, "skipped": skipped, "configured": True, "enabled": True, "candidates": candidates, "max_per_scan": ALERT_MAX_PER_SCAN}

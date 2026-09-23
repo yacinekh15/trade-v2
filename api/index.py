@@ -22,8 +22,8 @@ def _auth(d,secret,header):
     expected=d["SCAN_SECRET"]; supplied=header or secret
     if expected and supplied!=expected:raise HTTPException(401,"Invalid scan secret")
 
-def do_scan(tf):
-    d=deps(); started=time.time(); symbols=d["load_coins"](); results,failed=d["run_scan"](symbols,tf,d["CANDLE_LOOKBACK"]); alerts=d["check_and_alert"](results,tf); finished=time.time()
+def do_scan(tf, telegram_enabled=True):
+    d=deps(); started=time.time(); symbols=d["load_coins"](); results,failed=d["run_scan"](symbols,tf,d["CANDLE_LOOKBACK"]); alerts=d["check_and_alert"](results,tf,enabled=telegram_enabled); finished=time.time()
     payload={"status":"ok" if not failed else "partial","timeframe":tf,"updated_at":finished,"duration_seconds":round(finished-started,2),"coin_count":len(symbols),"successful_count":len(results),"failed_count":len(failed),"failed_samples":[{"symbol":s,"error":e} for s,e in failed[:10]],"results":results,"alerts":alerts}
     d["set_json"](key(tf),payload); d["set_json"](status_key(tf),{k:payload[k] for k in ("status","timeframe","updated_at","duration_seconds","coin_count","successful_count","failed_count","failed_samples","alerts")}); return payload
 
@@ -46,18 +46,20 @@ async def status(timeframe:str=None):
     return {"status":"ok","server_time":time.time(),"timeframe":tf,"scan":d["get_json"](status_key(tf),default={"status":"never_run","timeframe":tf}),"telegram_configured":bool(d["TELEGRAM_BOT_TOKEN"] and d["TELEGRAM_CHAT_ID"])}
 
 @app.post("/api/scan")
-async def scan(timeframe:str=Query(None),secret:str=Query(""),x_scan_secret:str=Header("",alias="X-Scan-Secret")):
+async def scan(timeframe:str=Query(None),secret:str=Query(""),telegram:int=Query(1, ge=0, le=1),x_scan_secret:str=Header("",alias="X-Scan-Secret")):
     d=deps(); _auth(d,secret,x_scan_secret); tf=timeframe or d["DEFAULT_TIMEFRAME"]
     if tf=="all":
         payloads={}; all_alerts=[]; started=time.time()
+        telegram_enabled = bool(telegram)
         for one in d["TIMEFRAMES"]:
-            p=do_scan(one); payloads[one]=p; all_alerts.append(p["alerts"])
+            p=do_scan(one, telegram_enabled=telegram_enabled); payloads[one]=p; all_alerts.append(p["alerts"])
         combined=d["combine_mtf"](payloads)
-        selective_alerts=d["check_and_alert_mtf"](payloads)
+        selective_alerts=d["check_and_alert_mtf"](payloads, enabled=telegram_enabled)
         d["set_json"]("results:all",{"status":"ok","updated_at":time.time(),"timeframes":d["TIMEFRAMES"],"results":combined,"alerts":selective_alerts,"duration_seconds":round(time.time()-started,2)})
-        return {"ok":True,"timeframe":"all","num_results":len(combined),"alerts":selective_alerts,"duration_seconds":round(time.time()-started,2)}
+        return {"ok":True,"timeframe":"all","num_results":len(combined),"telegram_enabled":telegram_enabled,"alerts":selective_alerts,"duration_seconds":round(time.time()-started,2)}
     if tf not in d["TIMEFRAMES"]:raise HTTPException(400,f"timeframe must be one of {d['TIMEFRAMES']}")
-    p=do_scan(tf); return {"ok":True,"timeframe":tf,"num_results":len(p["results"]),"failed_count":p["failed_count"],"duration_seconds":p["duration_seconds"],"alerts":p["alerts"]}
+    telegram_enabled = bool(telegram)
+    p=do_scan(tf, telegram_enabled=telegram_enabled); return {"ok":True,"timeframe":tf,"num_results":len(p["results"]),"failed_count":p["failed_count"],"duration_seconds":p["duration_seconds"],"telegram_enabled":telegram_enabled,"alerts":p["alerts"]}
 
 @app.get("/api/candles")
 async def candles(symbol:str,timeframe:str="1h",limit:int=220):
