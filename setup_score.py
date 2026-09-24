@@ -30,6 +30,7 @@ def score_symbol(symbol, candles):
     ema20_series = compute_ema_series(closes, 20)
     ema50_series = compute_ema_series(closes, 50)
     ema20, ema50 = ema20_series[-1], ema50_series[-1]
+    prev_ema20, prev_ema50 = ema20_series[-2], ema50_series[-2]
     macd_line, signal_line, histogram = compute_macd(closes)
     atr = compute_atr(candles, 14)
     volume_ratio = compute_volume_ratio(volumes, 20)
@@ -42,6 +43,8 @@ def score_symbol(symbol, candles):
     ema_equal = ema_state == "EQUAL"
     ema_cross_up = ema_crossed_up(ema20_series, ema50_series)
     ema_cross_down = ema_crossed_down(ema20_series, ema50_series)
+    prev_ema_bearish = prev_ema20 < prev_ema50
+    ema_convergence_from_below = prev_ema_bearish and ema_equal
     prev_close = closes[-2]
     bullish_candle = candles[-1]["close"] >= candles[-1]["open"]
     near_support = current > support and (current - support) / current <= 0.015 if current else False
@@ -93,6 +96,8 @@ def score_symbol(symbol, candles):
         reasons.append("EMA20 crossed above EMA50")
     if ema_cross_down:
         reasons.append("EMA20 crossed below EMA50")
+    if ema_convergence_from_below:
+        reasons.append(f"EMA20 reached EMA50 from below (gap {ema_gap_pct:.3f}%)")
 
     if near_support:
         reasons.append("Price is near recent support")
@@ -121,6 +126,7 @@ def score_symbol(symbol, candles):
     return {
         "symbol": symbol, "price": _round(current, 8), "score": score, "setup_type": setup_type,
         "ema_equal": ema_equal, "ema_cross_up": ema_cross_up, "ema_cross_down": ema_cross_down,
+        "ema_convergence_from_below": ema_convergence_from_below,
         "reasons": reasons or ["No strong bullish condition detected"],
         "indicators": {
             "rsi": _round(rsi, 2), "ema20": _round(ema20, 8), "ema50": _round(ema50, 8),

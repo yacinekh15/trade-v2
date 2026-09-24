@@ -91,10 +91,53 @@ def _message(r, tf, by_tf):
     )
 
 
-def check_and_alert(results, timeframe, enabled=True):
-    # Single-timeframe scans intentionally do not send high-confidence alerts because
-    # the selective Telegram policy requires higher-timeframe confirmation.
-    return {"sent": 0, "skipped": len(results), "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": bool(enabled), "reason": "MTF confirmation required; use ALL scan for Telegram alerts."}
+
+def _ema_convergence_message(r, tf):
+    i = r.get("indicators", {})
+    gap = float(i.get("ema_gap_pct") or 0)
+    direction = "reached EMA50 from below" if not r.get("ema_cross_up") else "crossed EMA50 from below"
+    return (
+        f"⚠️ *EMA20/EMA50 CONVERGENCE*\n"
+        f"Symbol: `{r['symbol']}`\nTimeframe: `{tf}`\n"
+        f"EMA20: `{_fmt(i.get('ema20', 0))}`\n"
+        f"EMA50: `{_fmt(i.get('ema50', 0))}`\n"
+        f"Gap: `{gap:.3f}%`\n\n"
+        f"EMA20 was below EMA50 and has {direction}.\n"
+        f"This is a *watch alert*, not a buy/sell signal.\n"
+        f"Wait for price structure, volume, momentum and higher-timeframe confirmation.\n\n"
+        f"_Scanner watch alert only. Verify the chart before making any trading decision._"
+    )
+
+def check_and_alert(results, timeframe, enabled=True, ema_enabled=True):
+    if not enabled or not ema_enabled:
+        return {"sent": 0, "skipped": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": False, "candidates": 0, "reason": "Telegram EMA convergence alerts disabled by dashboard toggle."}
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"sent": 0, "skipped": 0, "configured": False, "enabled": True, "candidates": 0}
+    if not ALERT_EMA_EQUAL:
+        return {"sent": 0, "skipped": 0, "configured": True, "enabled": True, "candidates": 0}
+
+    # Special watch alert: EMA20 was below EMA50 and has now entered the
+    # configured near-equality band. This is intentionally not a trade signal.
+    state = get_json(ALERT_STATE_KEY, default={}) or {}
+    now = time.time(); sent = skipped = candidates = 0; changed = False
+    for r in results:
+        if not r.get("ema_convergence_from_below"):
+            continue
+        candidates += 1
+        key = f"EMA_FROM_BELOW:{timeframe}:{r['symbol']}"
+        prev = state.get(key)
+        if isinstance(prev, dict) and now - float(prev.get("sent_at", 0)) < ALERT_COOLDOWN_MINUTES * 60:
+            skipped += 1
+            continue
+        if sent >= ALERT_MAX_PER_SCAN:
+            skipped += 1
+            continue
+        if send_message(_ema_convergence_message(r, timeframe)):
+            state[key] = {"sent_at": now, "gap": r.get("indicators", {}).get("ema_gap_pct")}
+            changed = True; sent += 1
+    if changed:
+        set_json(ALERT_STATE_KEY, state)
+    return {"sent": sent, "skipped": skipped, "configured": True, "enabled": True, "candidates": candidates, "reason": "EMA20 reached EMA50 from below watch alerts only."}
 
 
 def check_and_alert_mtf(scan_payloads, enabled=True):
