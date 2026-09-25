@@ -12,7 +12,46 @@ function render(){let min=Number($('minscore').value)||0;let list=results.filter
 async function load(){try{let tfs=tf==='all'?TF:[tf];let ps=await Promise.all(tfs.map(x=>fetch(`/api/results?timeframe=${x}`).then(r=>r.json())));let st=await fetch(`/api/status?timeframe=${tf==='all'?'1h':tf}`).then(r=>r.json());if(tf==='all'){let map={};ps.forEach(p=>{(p.results||[]).forEach(r=>{map[r.symbol]??={};map[r.symbol][r.timeframe]=r})});results=Object.entries(map).map(([symbol,mtf])=>{let vals=Object.values(mtf);let best=[...vals].sort((a,b)=>b.score-a.score)[0];return {...best,symbol,mtf,avg_score:Number((vals.reduce((a,x)=>a+x.score,0)/vals.length).toFixed(1)),bullish_timeframes:vals.filter(x=>x.indicators.ema20>x.indicators.ema50).length}});results.sort((a,b)=>b.avg_score-a.avg_score)}else{results=ps[0].results||[]}let latest=ps.map(x=>x.updated_at||0).reduce((a,b)=>Math.max(a,b),0);let success=ps.reduce((a,x)=>a+(x.successful_count||0),0),fail=ps.reduce((a,x)=>a+(x.failed_count||0),0);render();$('last').textContent=ft(latest);$('coverage').textContent=`${success||results.length} / ${fail}`;$('telegramConfig').textContent=st.telegram_configured?'Bot configured':'Bot not configured';renderTelegramToggle();renderEmaTelegramToggle();$('health').textContent='● ONLINE';}catch(e){$('health').textContent='● OFFLINE'}}
 $('scan').onclick=async()=>{let b=$('scan');b.disabled=true;b.textContent='⏳ SCANNING...';try{let tfs=tf==='all'?TF:[tf];let responses=await Promise.all(tfs.map(x=>fetch(`/api/scan?timeframe=${x}&telegram=${telegramSending?'1':'0'}&ema_alert=${emaTelegramSending?'1':'0'}`,{method:'POST'}).then(async r=>{let p=await r.json();if(!r.ok)throw new Error(p.detail||`Scan ${x} failed`);return p})));await load();let failed=responses.reduce((a,p)=>a+(p.failed_count||0),0),sent=responses.reduce((a,p)=>a+(p.alerts?.sent||0),0),candidates=responses.reduce((a,p)=>a+(p.alerts?.candidates||0),0);alert(`Scan complete\nTimeframes: ${tfs.join(', ')}\nFailed candles: ${failed}\nQualified Telegram alerts: ${telegramSending?'ON':'OFF'}\nEMA convergence alerts: ${emaTelegramSending?'ON':'OFF'}\nQualified Telegram candidates: ${candidates}\nTelegram alerts sent: ${sent}`)}catch(e){alert(e.message)}finally{b.disabled=false;b.textContent='🔍 SCAN NOW'}};
 document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.remove('active'));b.classList.add('active');render()});$('minscore').oninput=render;renderTF();renderTelegramToggle();renderEmaTelegramToggle();load();
-async function detail(symbol){let r=results.find(x=>x.symbol===symbol);if(!r)return;$('mtitle').textContent=symbol;$('detail').innerHTML=`<div class="two"><div><h3>Signal</h3><div class="kv"><div>Setup<br><b>${r.setup_type}</b></div><div>Score<br><b>${r.score}/100</b></div><div>Price<br><b>${fp(r.price)}</b></div><div>EMA state<br><b>${r.ema_equal?'EMA20 ≈ EMA50':r.ema_cross_up?'EMA20 crossed above EMA50':r.indicators.ema20>r.indicators.ema50?'Bullish':'Bearish'}</b></div></div></div><div><h3>Indicators</h3><div class="kv"><div>RSI<br>${r.indicators.rsi}</div><div>Volume<br>${r.indicators.volume_ratio}x</div><div>EMA20<br>${fp(r.indicators.ema20)}</div><div>EMA50<br>${fp(r.indicators.ema50)}</div><div>MACD<br>${fp(r.indicators.macd)}</div><div>ATR<br>${fp(r.indicators.atr)}</div><div>Support<br>${fp(r.indicators.support)}</div><div>Resistance<br>${fp(r.indicators.resistance)}</div></div></div></div><h3>Why</h3><ul>${(r.reasons||[]).map(x=>`<li>${x}</li>`).join('')}</ul><h3>Actions</h3><button class="btn" onclick="paper('${symbol}')">Add paper trade</button><button class="btn" onclick="backtest('${symbol}')">Backtest</button>`;$('modal').classList.add('open')}
+async function detail(symbol){
+ let r=results.find(x=>x.symbol===symbol);if(!r)return;
+ const a=r.analysis||{};
+ const tps=a.tp||[];
+ $('mtitle').textContent=`${symbol} — ${a.setup||r.setup_type}`;
+ const tpHtml=tps.map((x,i)=>`<div><b>TP${i+1}</b><br>${fp(x.level)}<br><span class="muted">R:R ${x.rr} · ${x.reason}</span></div>`).join('');
+ $('detail').innerHTML=`
+ <div class="two">
+   <div>
+     <h3>Scanner message</h3>
+     <div class="kv">
+       <div>BIAS<br><b class="${a.bias==='LONG'?'green':''}">${a.bias||'—'}</b></div>
+       <div>Setup<br><b>${a.setup||r.setup_type}</b></div>
+       <div>Score<br><b>${r.score}/100</b></div>
+       <div>Confidence<br><b>${a.confidence||'—'}</b></div>
+       <div>Entry zone<br><b>${a.entry?fp(a.entry.low)+' – '+fp(a.entry.high):'—'}</b></div>
+       <div>SL<br><b>${a.sl?fp(a.sl):'—'}</b></div>
+     </div>
+     <h3>Targets</h3><div class="kv">${tpHtml||'<div>—</div>'}</div>
+   </div>
+   <div>
+     <h3>Indicators</h3>
+     <div class="kv">
+       <div>RSI<br>${r.indicators.rsi}</div><div>Volume<br>${r.indicators.volume_ratio}x</div>
+       <div>EMA20<br>${fp(r.indicators.ema20)}</div><div>EMA50<br>${fp(r.indicators.ema50)}</div>
+       <div>MACD<br>${fp(r.indicators.macd)}</div><div>ATR<br>${fp(r.indicators.atr)}</div>
+       <div>Support<br>${fp(r.indicators.support)}</div><div>Resistance<br>${fp(r.indicators.resistance)}</div>
+     </div>
+   </div>
+ </div>
+ <h3>Why</h3><ul>${(r.reasons||[]).map(x=>`<li>${x}</li>`).join('')}</ul>
+ <h3>Historical pattern context</h3><p class="muted">${a.historical||'—'}</p>
+ <h3>Invalidation</h3><p>${a.invalidation||'—'}</p>
+ <h3>Counter-argument</h3><p>${a.counter_argument||'—'}</p>
+ <div class="panel" style="margin-top:12px"><b>Important:</b> this is a scanner scenario, not a guaranteed prediction. The score is rule alignment, not a win probability. Verify the chart before acting.</div>
+ <h3>Actions</h3>
+ <button class="btn" onclick="paper('${symbol}')">Add paper trade</button>
+ <button class="btn" onclick="backtest('${symbol}')">Backtest</button>`;
+ $('modal').classList.add('open')
+}
 $('close').onclick=()=>$('modal').classList.remove('open');$('modal').onclick=e=>{if(e.target.id==='modal')$('modal').classList.remove('open')};
 async function backtest(symbol){let p=await (await fetch(`/api/backtest?symbol=${symbol}&timeframe=${tf==='all'?'1h':tf}`,{method:'POST'})).json();alert(JSON.stringify(p.summary||p,null,2))}
 async function paper(symbol){let r=results.find(x=>x.symbol===symbol);let note=prompt('Optional note for this paper trade:','');if(note===null)return;let body={symbol,timeframe:tf==='all'?'1h':tf,entry:r.price,score:r.score,note};let p=await (await fetch('/api/paper-trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();alert(p.ok?'Paper trade saved.':'Failed to save paper trade.');}

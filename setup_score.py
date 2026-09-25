@@ -15,6 +15,84 @@ def _round(value, digits=4):
     return None if value is None else round(float(value), digits)
 
 
+
+def _build_analysis(current, score, setup_type, rsi, ema20, ema50, macd_line,
+                    macd_signal, volume_ratio, atr, support, resistance):
+    """Build a deterministic analyst-style explanation from scanner data.
+    This is not an AI prediction and does not claim statistical win rates.
+    """
+    bullish_structure = ema20 > ema50 and current > ema50
+    momentum_ok = macd_line > macd_signal and rsi >= 45
+    near_support = support > 0 and abs(current - support) / current <= 0.02
+    resistance_gap = (resistance - current) / current if current else 1
+
+    # Informational long setup levels. They are scenario levels, not orders.
+    if bullish_structure:
+        entry_low = max(0.0, min(current, support if near_support else current - 0.5 * atr))
+        entry_high = current + 0.15 * atr
+        invalidation = min(support - 0.3 * atr, entry_low - 0.3 * atr)
+        if invalidation <= 0:
+            invalidation = max(0.0, current - 1.5 * atr)
+        risk = max(entry_high - invalidation, 1e-12)
+        tp1 = resistance if resistance > entry_high else entry_high + 1.5 * risk
+        tp2 = max(tp1 + 0.75 * risk, entry_high + 3 * atr)
+        tp3 = max(tp2 + 0.75 * risk, entry_high + 5 * atr)
+        rr1 = (tp1 - entry_high) / risk
+        rr2 = (tp2 - entry_high) / risk
+        rr3 = (tp3 - entry_high) / risk
+    else:
+        entry_low = entry_high = current
+        invalidation = max(0.0, current - 1.5 * atr)
+        risk = max(current - invalidation, 1e-12)
+        tp1 = tp2 = tp3 = current
+        rr1 = rr2 = rr3 = 0.0
+
+    if score >= 85 and bullish_structure and momentum_ok and volume_ratio >= 1.2:
+        confidence = "High"
+    elif score >= 70 and bullish_structure and momentum_ok:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    if setup_type in {"PULLBACK", "SUPPORT_BOUNCE"}:
+        historical = "[Qualitative] Pullbacks/support bounces inside an established bullish structure can resume when momentum and participation recover."
+    elif setup_type == "BREAKOUT":
+        historical = "[Qualitative] Breakouts can continue when the level is reclaimed with participation; failed breakouts can quickly return to the prior range."
+    elif setup_type == "REVERSAL":
+        historical = "[Qualitative] Early reversals can develop after momentum recovery, but they remain vulnerable until market structure confirms the change."
+    else:
+        historical = "[Qualitative] Trend/momentum setups can continue while structure remains intact; weakening momentum or a support break can invalidate the scenario."
+
+    if resistance_gap <= 0.015:
+        counter = "Nearby resistance may limit upside and weaken the risk/reward."
+    elif not bullish_structure:
+        counter = "The EMA structure is not fully bullish, so continuation remains unconfirmed."
+    elif volume_ratio < 1.2:
+        counter = "Volume is not strongly above average, reducing participation confirmation."
+    else:
+        counter = "A failed momentum recovery or loss of the nearby support area would weaken the setup."
+
+    rr_rule = rr1 >= 1.5
+    bias = "LONG" if bullish_structure and momentum_ok and rr_rule and setup_type not in {"WATCH", "NOSETUP"} else "NO TRADE"
+    return {
+        "bias": bias,
+        "setup": setup_type,
+        "entry": {"low": round(entry_low, 8), "high": round(entry_high, 8)},
+        "sl": round(invalidation, 8),
+        "tp": [
+            {"level": round(tp1, 8), "rr": round(rr1, 2), "reason": "Nearest meaningful resistance / first measured objective"},
+            {"level": round(tp2, 8), "rr": round(rr2, 2), "reason": "Next expansion objective using volatility/structure"},
+            {"level": round(tp3, 8), "rr": round(rr3, 2), "reason": "Extended objective; requires continued momentum"},
+        ],
+        "historical": historical,
+        "invalidation": f"Scenario invalid if price closes below the support/invalidation area near {_round(invalidation, 8)}.",
+        "counter_argument": counter,
+        "confidence": confidence,
+        "rr_tp1": round(rr1, 2),
+        "rule_passed": rr_rule,
+    }
+
+
 def score_symbol(symbol, candles):
     if not candles or len(candles) < 61:
         return None
@@ -123,11 +201,13 @@ def score_symbol(symbol, candles):
         setup_type = "NOSETUP"
 
     score = max(0, min(100, int(round(score))))
+    analysis = _build_analysis(current, score, setup_type, rsi, ema20, ema50, macd_line, signal_line, volume_ratio, atr, support, resistance)
     return {
         "symbol": symbol, "price": _round(current, 8), "score": score, "setup_type": setup_type,
         "ema_equal": ema_equal, "ema_cross_up": ema_cross_up, "ema_cross_down": ema_cross_down,
         "ema_convergence_from_below": ema_convergence_from_below,
         "reasons": reasons or ["No strong bullish condition detected"],
+        "analysis": analysis,
         "indicators": {
             "rsi": _round(rsi, 2), "ema20": _round(ema20, 8), "ema50": _round(ema50, 8),
             "ema_gap_pct": _round(ema_gap_pct, 4), "macd": _round(macd_line, 8),
