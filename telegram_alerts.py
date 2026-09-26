@@ -2,7 +2,7 @@
 import time, requests
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALERT_SETUP_TYPES, ALERT_MIN_SCORE,
-    ALERT_MIN_VOLUME_RATIO, ALERT_COOLDOWN_MINUTES, ALERT_EMA_EQUAL,
+    ALERT_MIN_VOLUME_RATIO, ALERT_MIN_ENTRY_QUALITY, ALERT_COOLDOWN_MINUTES, ALERT_EMA_EQUAL,
     ALERT_MAX_PER_SCAN,
 )
 from upstash_client import get_json, set_json
@@ -63,9 +63,13 @@ def _mtf_qualified(symbol, tf, by_tf):
 def _eligible(r, tf, by_tf):
     setup = r.get("setup_type")
     score = int(r.get("score", 0))
+    quality = int(r.get("entry_quality", 0))
     vol = float(r.get("indicators", {}).get("volume_ratio") or 0)
-    if setup not in ALERT_SETUP_TYPES or score < ALERT_MIN_SCORE or vol < ALERT_MIN_VOLUME_RATIO:
-        return False, "score/setup/volume filter"
+    analysis = r.get("analysis", {})
+    if setup not in ALERT_SETUP_TYPES or score < ALERT_MIN_SCORE or quality < ALERT_MIN_ENTRY_QUALITY or vol < ALERT_MIN_VOLUME_RATIO:
+        return False, "quality/setup/volume filter"
+    if not r.get("qualified") or not analysis.get("rule_passed"):
+        return False, "entry quality or R:R failed"
     if not _is_bullish(r):
         return False, "trend/momentum conflict"
     ok, missing = _mtf_qualified(r["symbol"], tf, by_tf)
@@ -82,7 +86,7 @@ def _message(r, tf, by_tf):
     mtf = "  ".join(f"{h} {v}" for h, v in higher.items())
     return (
         f"🚨 *HIGH-QUALITY {r['setup_type']}*\n"
-        f"Symbol: `{symbol}`\nTimeframe: `{tf}`\nScore: *{r['score']}/100*\n\n"
+        f"Symbol: `{symbol}`\nTimeframe: `{tf}`\nScore: *{r['score']}/100* | Entry quality: *{r.get('entry_quality', 0)}/100*\n\n"
         f"Entry/reference: `{_fmt(entry)}`\nTarget/reference: `{_fmt(target)}`\nInvalidation/reference: `{_fmt(stop)}`\n\n"
         f"*MTF*\n{mtf or '—'}\n\n*Why*\n{reasons}\n\n"
         f"RSI: `{r['indicators']['rsi']}` | Volume: `{r['indicators']['volume_ratio']}x`\n"

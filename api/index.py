@@ -101,6 +101,37 @@ async def backtest(symbol:str,timeframe:str="1h",limit:int=None,min_score:int=70
     except Exception as e:raise HTTPException(502,f"Backtest data error: {e}")
 
 from pydantic import BaseModel
+from typing import Optional
+
+AUTO_KEY = "auto_scan_settings"
+AUTO_LOCK_KEY = "auto_scan_lock"
+
+def default_auto_settings():
+    return {
+        "enabled": False,
+        "timeframe": "1h",
+        "interval_minutes": 15,
+        "telegram": True,
+        "ema_alert": True,
+        "updated_at": time.time(),
+        "last_run_at": 0,
+        "next_run_at": 0,
+        "last_status": "never_run",
+    }
+
+def get_auto_settings(d):
+    value = d["get_json"](AUTO_KEY, default=None)
+    if not isinstance(value, dict):
+        value = default_auto_settings()
+    base = default_auto_settings(); base.update(value)
+    return base
+
+class AutoScanSettings(BaseModel):
+    enabled: Optional[bool] = None
+    timeframe: Optional[str] = None
+    interval_minutes: Optional[int] = None
+    telegram: Optional[bool] = None
+    ema_alert: Optional[bool] = None
 
 class PaperTrade(BaseModel):
     symbol: str
@@ -118,6 +149,59 @@ async def add_paper_trade(trade: PaperTrade):
     d=deps(); rows=d["get_json"]("paper_trades", default=[]) or []
     rows.insert(0,{"id":int(time.time()*1000),**trade.model_dump(),"created_at":time.time(),"status":"OPEN"})
     rows=rows[:200]; d["set_json"]("paper_trades",rows); return {"ok":True,"trade":rows[0]}
+
+
+@app.get("/api/autoscan")
+async def autoscan_status():
+    d=deps(); cfg=get_auto_settings(d)
+    return {"ok":True,"autoscan":cfg,"server_time":time.time()}
+
+@app.post("/api/autoscan")
+async def autoscan_update(settings: AutoScanSettings):
+    d=deps(); cfg=get_auto_settings(d); now=time.time()
+    if settings.timeframe is not None:
+        if settings.timeframe not in d["TIMEFRAMES"]:
+            raise HTTPException(400,f"timeframe must be one of {d['TIMEFRAMES']}")
+        cfg["timeframe"]=settings.timeframe
+    if settings.interval_minutes is not None:
+        if settings.interval_minutes not in (5,15,30,60):
+            raise HTTPException(400,"interval_minutes must be 5, 15, 30, or 60")
+        cfg["interval_minutes"]=settings.interval_minutes
+    if settings.telegram is not None: cfg["telegram"]=bool(settings.telegram)
+    if settings.ema_alert is not None: cfg["ema_alert"]=bool(settings.ema_alert)
+    if settings.enabled is not None:
+        was=bool(cfg.get("enabled")); cfg["enabled"]=bool(settings.enabled)
+        if cfg["enabled"] and not was:
+            cfg["next_run_at"]=now
+        elif not cfg["enabled"]:
+            cfg["next_run_at"]=0
+    cfg["updated_at"]=now
+    d["set_json"](AUTO_KEY,cfg)
+    return {"ok":True,"autoscan":cfg}
+
+@app.post("/api/auto-scan")
+async def auto_scan(secret:str=Query(""),x_scan_secret:str=Header("",alias="X-Scan-Secret")):
+    d=deps(); _auth(d,secret,x_scan_secret); now=time.time(); cfg=get_auto_settings(d)
+    if not cfg.get("enabled"):
+        return {"ok":True,"ran":False,"reason":"disabled","autoscan":cfg}
+    if now < float(cfg.get("next_run_at") or 0):
+        return {"ok":True,"ran":False,"reason":"not_due","next_run_at":cfg.get("next_run_at"),"autoscan":cfg}
+    lock=d["get_json"](AUTO_LOCK_KEY, default=None)
+    if isinstance(lock,dict) and float(lock.get("until",0)) > now:
+        return {"ok":True,"ran":False,"reason":"already_running","autoscan":cfg}
+    d["set_json"](AUTO_LOCK_KEY,{"until":now+300,"started_at":now})
+    try:
+        tf=cfg.get("timeframe","1h")
+        p=do_scan(tf, telegram_enabled=bool(cfg.get("telegram",True)), ema_alert_enabled=bool(cfg.get("ema_alert",True)))
+        finished=time.time(); cfg=get_auto_settings(d)
+        cfg["last_run_at"]=finished
+        cfg["next_run_at"]=finished + int(cfg.get("interval_minutes",15))*60
+        cfg["last_status"]=p.get("status","ok")
+        cfg["updated_at"]=finished
+        d["set_json"](AUTO_KEY,cfg)
+        return {"ok":True,"ran":True,"timeframe":tf,"duration_seconds":p.get("duration_seconds"),"alerts":p.get("alerts"),"autoscan":cfg}
+    finally:
+        d["set_json"](AUTO_LOCK_KEY,{"until":0})
 
 @app.post("/api/timeframe")
 async def set_timeframe(timeframe:str=Query(...)):
