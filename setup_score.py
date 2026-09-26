@@ -15,6 +15,86 @@ def _round(value, digits=4):
     return None if value is None else round(float(value), digits)
 
 
+
+def _build_analysis(current, score, setup_type, rsi, ema20, ema50, macd_line,
+                    macd_signal, volume_ratio, atr, support, resistance):
+    """Build a deterministic analyst-style explanation from scanner data.
+    This is not an AI prediction and does not claim statistical win rates.
+    """
+    bullish_structure = ema20 > ema50 and current > ema50
+    momentum_ok = macd_line > macd_signal and rsi >= 45
+    near_support = support > 0 and abs(current - support) / current <= 0.02
+    resistance_gap = (resistance - current) / current if current else 1
+
+    # Informational long setup levels. They are scenario levels, not orders.
+    if bullish_structure:
+        entry_low = max(0.0, min(current, support if near_support else current - 0.5 * atr))
+        entry_high = current + 0.15 * atr
+        invalidation = min(support - 0.3 * atr, entry_low - 0.3 * atr)
+        if invalidation <= 0:
+            invalidation = max(0.0, current - 1.5 * atr)
+        risk = max(entry_high - invalidation, 1e-12)
+        tp1 = resistance if resistance > entry_high else entry_high + 1.5 * risk
+        tp2 = max(tp1 + 0.75 * risk, entry_high + 3 * atr)
+        tp3 = max(tp2 + 0.75 * risk, entry_high + 5 * atr)
+        rr1 = (tp1 - entry_high) / risk
+        rr2 = (tp2 - entry_high) / risk
+        rr3 = (tp3 - entry_high) / risk
+    else:
+        entry_low = entry_high = current
+        invalidation = max(0.0, current - 1.5 * atr)
+        risk = max(current - invalidation, 1e-12)
+        tp1 = tp2 = tp3 = current
+        rr1 = rr2 = rr3 = 0.0
+
+    if score >= 85 and bullish_structure and momentum_ok and volume_ratio >= 1.2:
+        confidence = "High"
+    elif score >= 70 and bullish_structure and momentum_ok:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    if setup_type in {"PULLBACK", "SUPPORT_BOUNCE"}:
+        historical = "[Qualitative] Pullbacks/support bounces inside an established bullish structure can resume when momentum and participation recover."
+    elif setup_type == "BREAKOUT":
+        historical = "[Qualitative] Breakouts can continue when the level is reclaimed with participation; failed breakouts can quickly return to the prior range."
+    elif setup_type == "EMA200_MACD":
+        historical = "[Qualitative] Trend-following setups using a long-term EMA with MACD confirmation can participate in established trends; flat or declining EMA200 conditions can produce weaker signals."
+    elif setup_type == "REVERSAL":
+        historical = "[Qualitative] Early reversals can develop after momentum recovery, but they remain vulnerable until market structure confirms the change."
+    else:
+        historical = "[Qualitative] Trend/momentum setups can continue while structure remains intact; weakening momentum or a support break can invalidate the scenario."
+
+    if resistance_gap <= 0.015:
+        counter = "Nearby resistance may limit upside and weaken the risk/reward."
+    elif not bullish_structure:
+        counter = "The EMA structure is not fully bullish, so continuation remains unconfirmed."
+    elif volume_ratio < 1.2:
+        counter = "Volume is not strongly above average, reducing participation confirmation."
+    else:
+        counter = "A failed momentum recovery or loss of the nearby support area would weaken the setup."
+
+    rr_rule = rr1 >= 1.5
+    bias = "LONG" if bullish_structure and momentum_ok and rr_rule and setup_type not in {"WATCH", "NOSETUP"} else "NO TRADE"
+    return {
+        "bias": bias,
+        "setup": setup_type,
+        "entry": {"low": round(entry_low, 8), "high": round(entry_high, 8)},
+        "sl": round(invalidation, 8),
+        "tp": [
+            {"level": round(tp1, 8), "rr": round(rr1, 2), "reason": "Nearest meaningful resistance / first measured objective"},
+            {"level": round(tp2, 8), "rr": round(rr2, 2), "reason": "Next expansion objective using volatility/structure"},
+            {"level": round(tp3, 8), "rr": round(rr3, 2), "reason": "Extended objective; requires continued momentum"},
+        ],
+        "historical": historical,
+        "invalidation": f"Scenario invalid if price closes below the support/invalidation area near {_round(invalidation, 8)}.",
+        "counter_argument": counter,
+        "confidence": confidence,
+        "rr_tp1": round(rr1, 2),
+        "rule_passed": rr_rule,
+    }
+
+
 def score_symbol(symbol, candles):
     if not candles or len(candles) < 61:
         return None
@@ -29,13 +109,17 @@ def score_symbol(symbol, candles):
     rsi = compute_rsi(closes, 14)
     ema20_series = compute_ema_series(closes, 20)
     ema50_series = compute_ema_series(closes, 50)
+    ema200_series = compute_ema_series(closes, 200)
     ema20, ema50 = ema20_series[-1], ema50_series[-1]
+    ema200 = ema200_series[-1]
+    prev_ema200 = ema200_series[-2] if len(ema200_series) >= 2 else None
     prev_ema20, prev_ema50 = ema20_series[-2], ema50_series[-2]
     macd_line, signal_line, histogram = compute_macd(closes)
+    prev_macd_line, prev_signal_line, _ = compute_macd(closes[:-1])
     atr = compute_atr(candles, 14)
     volume_ratio = compute_volume_ratio(volumes, 20)
     support, resistance = compute_support_resistance(candles, 20)
-    required = [rsi, ema20, ema50, macd_line, signal_line, histogram, atr, volume_ratio, support, resistance]
+    required = [rsi, ema20, ema50, ema200, prev_ema200, macd_line, signal_line, histogram, prev_macd_line, prev_signal_line, atr, volume_ratio, support, resistance]
     if any(v is None for v in required):
         return None
 
@@ -49,6 +133,8 @@ def score_symbol(symbol, candles):
     bullish_candle = candles[-1]["close"] >= candles[-1]["open"]
     near_support = current > support and (current - support) / current <= 0.015 if current else False
     near_ema20 = abs(current - ema20) / current <= 0.015 if current else False
+    ema200_rising = ema200 > prev_ema200
+    macd_cross_up = prev_macd_line <= prev_signal_line and macd_line > signal_line
 
     score = 0
     reasons = []
@@ -58,6 +144,10 @@ def score_symbol(symbol, candles):
         score += 10; reasons.append("EMA20 above EMA50")
     if current > ema50:
         score += 5; reasons.append("Price above EMA50")
+    if current > ema200:
+        score += 10; reasons.append("Price above EMA200")
+    if ema200_rising:
+        score += 5; reasons.append("EMA200 rising")
 
     if 50 <= rsi <= 70:
         score += 15; reasons.append(f"RSI constructive ({rsi:.1f})")
@@ -70,6 +160,8 @@ def score_symbol(symbol, candles):
         score += 10; reasons.append("MACD above signal")
     if histogram > 0:
         score += 5; reasons.append("MACD histogram positive")
+    if macd_cross_up:
+        score += 5; reasons.append("MACD bullish crossover")
 
     if volume_ratio >= 1.5:
         score += 15; reasons.append(f"Volume elevated ({volume_ratio:.2f}x)")
@@ -107,6 +199,8 @@ def score_symbol(symbol, candles):
     # Setup classification. These are labels for market structure, not trade instructions.
     if breakout and volume_ratio >= 1.2 and ema20 > ema50 and macd_line > signal_line:
         setup_type = "BREAKOUT"
+    elif current > ema200 and ema200_rising and macd_cross_up and ema20 > ema50 and rsi >= 45 and volume_ratio >= 1.0:
+        setup_type = "EMA200_MACD"
     elif ema_cross_up and rsi >= 50 and volume_ratio >= 1.2:
         setup_type = "REVERSAL"
     elif score >= 70 and macd_line > signal_line and current > ema20 and volume_ratio >= 1.2:
@@ -123,16 +217,20 @@ def score_symbol(symbol, candles):
         setup_type = "NOSETUP"
 
     score = max(0, min(100, int(round(score))))
+    analysis = _build_analysis(current, score, setup_type, rsi, ema20, ema50, macd_line, signal_line, volume_ratio, atr, support, resistance)
     return {
         "symbol": symbol, "price": _round(current, 8), "score": score, "setup_type": setup_type,
         "ema_equal": ema_equal, "ema_cross_up": ema_cross_up, "ema_cross_down": ema_cross_down,
         "ema_convergence_from_below": ema_convergence_from_below,
+        "ema200_bullish": current > ema200 and ema200_rising,
         "reasons": reasons or ["No strong bullish condition detected"],
+        "analysis": analysis,
         "indicators": {
             "rsi": _round(rsi, 2), "ema20": _round(ema20, 8), "ema50": _round(ema50, 8),
             "ema_gap_pct": _round(ema_gap_pct, 4), "macd": _round(macd_line, 8),
             "macd_signal": _round(signal_line, 8), "macd_histogram": _round(histogram, 8),
             "atr": _round(atr, 8), "volume_ratio": _round(volume_ratio, 2),
             "support": _round(support, 8), "resistance": _round(resistance, 8),
+            "ema200": _round(ema200, 8), "ema200_rising": ema200_rising, "macd_cross_up": macd_cross_up,
         },
     }

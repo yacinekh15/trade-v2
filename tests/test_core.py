@@ -3,7 +3,7 @@ from indicators_engine import ema_relationship, ema_crossed_up
 from setup_score import score_symbol
 from backtest import backtest_candles
 
-def candles(n=180):
+def candles(n=260):
     out=[]; price=100.0
     for i in range(n):
         price += 0.2 + 0.8*math.sin(i/7)

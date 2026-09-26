@@ -12,7 +12,7 @@ def _levels(result):
 
 def backtest_candles(symbol,candles,timeframe="1h",min_score=70,max_hold=24):
     """Signal on closed candle i; enter at next candle open; evaluate subsequent OHLC."""
-    trades=[]; warmup=61
+    trades=[]; warmup=201
     for i in range(warmup,len(candles)-1):
         window=candles[:i+1]
         r=score_symbol(symbol,window+[candles[i+1]]) if False else score_symbol(symbol,window)
@@ -21,7 +21,7 @@ def backtest_candles(symbol,candles,timeframe="1h",min_score=70,max_hold=24):
         # Instead use the exact historical prefix ending at i+1 and treat candle i as closed.
         if i+1 >= len(candles): break
         r=score_symbol(symbol,candles[:i+2])
-        if not r or r["score"]<min_score or r["setup_type"] not in {"BREAKOUT","MOMENTUM"}: continue
+        if not r or r["score"]<min_score or r["setup_type"] not in {"BREAKOUT","MOMENTUM","EMA200_MACD"}: continue
         entry_c=candles[i+1]; entry=float(entry_c["open"])
         # Use signal-derived ATR/support/resistance from candle i, but entry is next open.
         atr=float(r["indicators"].get("atr") or 0); support=float(r["indicators"].get("support") or entry); resistance=float(r["indicators"].get("resistance") or entry)

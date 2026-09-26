@@ -87,6 +87,12 @@ def _message(r, tf, by_tf):
         f"*MTF*\n{mtf or '—'}\n\n*Why*\n{reasons}\n\n"
         f"RSI: `{r['indicators']['rsi']}` | Volume: `{r['indicators']['volume_ratio']}x`\n"
         f"EMA20: `{_fmt(r['indicators']['ema20'])}` | EMA50: `{_fmt(r['indicators']['ema50'])}`\n\n"
+        f"\n*Analysis*\nBias: `{r.get('analysis', {}).get('bias', '—')}`\n"
+        f"Entry zone: `{_fmt(r.get('analysis', {}).get('entry', {}).get('low', entry))}` – `{_fmt(r.get('analysis', {}).get('entry', {}).get('high', entry))}`\n"
+        f"SL: `{_fmt(r.get('analysis', {}).get('sl', stop))}` | TP1 R:R: `{r.get('analysis', {}).get('rr_tp1', 0)}`\n"
+        f"Confidence: `{r.get('analysis', {}).get('confidence', '—')}`\n"
+        f"Invalidation: {r.get('analysis', {}).get('invalidation', '—')}\n"
+        f"Counter-argument: {r.get('analysis', {}).get('counter_argument', '—')}\n\n"
         f"_Scanner alert only. Verify the chart and setup before making any trading decision._"
     )
 
@@ -108,18 +114,22 @@ def _ema_convergence_message(r, tf):
         f"_Scanner watch alert only. Verify the chart before making any trading decision._"
     )
 
-def check_and_alert(results, timeframe, enabled=True, ema_enabled=True):
-    if not enabled or not ema_enabled:
-        return {"sent": 0, "skipped": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": False, "candidates": 0, "reason": "Telegram EMA convergence alerts disabled by dashboard toggle."}
+def check_ema_convergence_alert(results, timeframe, enabled=True):
+    """Independent EMA20/EMA50 watch channel."""
+    if not enabled:
+        return {"sent": 0, "skipped": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+                "enabled": False, "candidates": 0,
+                "reason": "EMA convergence alerts disabled by dashboard toggle."}
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return {"sent": 0, "skipped": 0, "configured": False, "enabled": True, "candidates": 0}
     if not ALERT_EMA_EQUAL:
         return {"sent": 0, "skipped": 0, "configured": True, "enabled": True, "candidates": 0}
 
-    # Special watch alert: EMA20 was below EMA50 and has now entered the
-    # configured near-equality band. This is intentionally not a trade signal.
     state = get_json(ALERT_STATE_KEY, default={}) or {}
-    now = time.time(); sent = skipped = candidates = 0; changed = False
+    now = time.time()
+    sent = skipped = candidates = 0
+    changed = False
+
     for r in results:
         if not r.get("ema_convergence_from_below"):
             continue
@@ -134,10 +144,51 @@ def check_and_alert(results, timeframe, enabled=True, ema_enabled=True):
             continue
         if send_message(_ema_convergence_message(r, timeframe)):
             state[key] = {"sent_at": now, "gap": r.get("indicators", {}).get("ema_gap_pct")}
-            changed = True; sent += 1
+            changed = True
+            sent += 1
+
     if changed:
         set_json(ALERT_STATE_KEY, state)
-    return {"sent": sent, "skipped": skipped, "configured": True, "enabled": True, "candidates": candidates, "reason": "EMA20 reached EMA50 from below watch alerts only."}
+    return {"sent": sent, "skipped": skipped, "configured": True, "enabled": True,
+            "candidates": candidates, "reason": "EMA20 reached EMA50 from below watch alerts only."}
+
+
+def check_and_alert(results, timeframe, enabled=True):
+    """Independent normal setup alert channel."""
+    if not enabled:
+        return {"sent": 0, "skipped": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+                "enabled": False, "candidates": 0,
+                "reason": "Normal setup alerts disabled by dashboard toggle."}
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"sent": 0, "skipped": 0, "configured": False, "enabled": True, "candidates": 0}
+
+    state = get_json(ALERT_STATE_KEY, default={}) or {}
+    now = time.time()
+    sent = skipped = candidates = 0
+    changed = False
+
+    for r in sorted(results, key=lambda x: x.get("score", 0), reverse=True):
+        qualified, _ = _eligible(r, timeframe, {timeframe: {r["symbol"]: r}})
+        if not qualified:
+            continue
+        candidates += 1
+        key = f"{timeframe}:{r['symbol']}:{r['setup_type']}"
+        prev = state.get(key)
+        if isinstance(prev, dict) and now - float(prev.get("sent_at", 0)) < ALERT_COOLDOWN_MINUTES * 60:
+            skipped += 1
+            continue
+        if sent >= ALERT_MAX_PER_SCAN:
+            skipped += 1
+            continue
+        if send_message(_message(r, timeframe, {timeframe: {r["symbol"]: r}})):
+            state[key] = {"sent_at": now, "score": r["score"]}
+            changed = True
+            sent += 1
+
+    if changed:
+        set_json(ALERT_STATE_KEY, state)
+    return {"sent": sent, "skipped": skipped, "configured": True, "enabled": True,
+            "candidates": candidates, "max_per_scan": ALERT_MAX_PER_SCAN}
 
 
 def check_and_alert_mtf(scan_payloads, enabled=True):

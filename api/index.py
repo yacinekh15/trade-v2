@@ -8,7 +8,7 @@ def deps():
     try:
         from config import load_coins,TIMEFRAMES,DEFAULT_TIMEFRAME,CANDLE_LOOKBACK,SCAN_SECRET,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,BACKTEST_DEFAULT_LIMIT,BACKTEST_MAX_LIMIT
         from scanner import run_scan,combine_mtf
-        from telegram_alerts import check_and_alert, check_and_alert_mtf
+        from telegram_alerts import check_and_alert, check_ema_convergence_alert, check_and_alert_mtf
         from upstash_client import get_json,set_json,configured as upstash_configured
         from binance_data import get_klines
         from backtest import backtest_candles
@@ -23,9 +23,28 @@ def _auth(d,secret,header):
     if expected and supplied!=expected:raise HTTPException(401,"Invalid scan secret")
 
 def do_scan(tf, telegram_enabled=True, ema_alert_enabled=True):
-    d=deps(); started=time.time(); symbols=d["load_coins"](); results,failed=d["run_scan"](symbols,tf,d["CANDLE_LOOKBACK"]); alerts=d["check_and_alert"](results,tf,enabled=telegram_enabled,ema_enabled=ema_alert_enabled); finished=time.time()
-    payload={"status":"ok" if not failed else "partial","timeframe":tf,"updated_at":finished,"duration_seconds":round(finished-started,2),"coin_count":len(symbols),"successful_count":len(results),"failed_count":len(failed),"failed_samples":[{"symbol":s,"error":e} for s,e in failed[:10]],"results":results,"alerts":alerts}
-    d["set_json"](key(tf),payload); d["set_json"](status_key(tf),{k:payload[k] for k in ("status","timeframe","updated_at","duration_seconds","coin_count","successful_count","failed_count","failed_samples","alerts")}); return payload
+    d=deps()
+    started=time.time()
+    symbols=d["load_coins"]()
+    results,failed=d["run_scan"](symbols,tf,d["CANDLE_LOOKBACK"])
+    normal=d["check_and_alert"](results,tf,enabled=telegram_enabled)
+    ema=d["check_ema_convergence_alert"](results,tf,enabled=ema_alert_enabled)
+    alerts={
+        "sent": normal.get("sent",0) + ema.get("sent",0),
+        "skipped": normal.get("skipped",0) + ema.get("skipped",0),
+        "candidates": normal.get("candidates",0) + ema.get("candidates",0),
+        "normal": normal,
+        "ema": ema,
+    }
+    finished=time.time()
+    payload={"status":"ok" if not failed else "partial","timeframe":tf,"updated_at":finished,
+             "duration_seconds":round(finished-started,2),"coin_count":len(symbols),
+             "successful_count":len(results),"failed_count":len(failed),
+             "failed_samples":[{"symbol":s,"error":e} for s,e in failed[:10]],
+             "results":results,"alerts":alerts}
+    d["set_json"](key(tf),payload)
+    d["set_json"](status_key(tf),{k:payload[k] for k in ("status","timeframe","updated_at","duration_seconds","coin_count","successful_count","failed_count","failed_samples","alerts")})
+    return payload
 
 @app.get("/api/health")
 async def health():
@@ -53,7 +72,7 @@ async def scan(timeframe:str=Query(None),secret:str=Query(""),telegram:int=Query
         telegram_enabled = bool(telegram)
         ema_alert_enabled = bool(ema_alert)
         for one in d["TIMEFRAMES"]:
-            p=do_scan(one, telegram_enabled=telegram_enabled, ema_alert_enabled=ema_alert_enabled); payloads[one]=p; all_alerts.append(p["alerts"])
+            p=do_scan(one, telegram_enabled=False, ema_alert_enabled=ema_alert_enabled); payloads[one]=p; all_alerts.append(p["alerts"])
         combined=d["combine_mtf"](payloads)
         selective_alerts=d["check_and_alert_mtf"](payloads, enabled=telegram_enabled)
         d["set_json"]("results:all",{"status":"ok","updated_at":time.time(),"timeframes":d["TIMEFRAMES"],"results":combined,"alerts":selective_alerts,"duration_seconds":round(time.time()-started,2)})
