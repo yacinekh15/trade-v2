@@ -10,7 +10,7 @@ Deploy as a Python/FastAPI project. `vercel.json` sets the API function timeout.
 - `TELEGRAM_CHAT_ID`
 
 Optional:
-- `ALERT_MIN_SCORE` (default 80)
+- `ALERT_MIN_SCORE` (default 70)
 - `ALERT_COOLDOWN_MINUTES` (default 240)
 - `EMA_EQUAL_TOLERANCE_PCT` (default 0.05). Exact floating-point equality is not used; an EMA20/EMA50 gap inside this percentage is treated as “equal/converged”.
 - `ALERT_EMA_EQUAL=1` (default)
