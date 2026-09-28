@@ -28,11 +28,15 @@ def _command(*args):
 
 
 def set_json(key, obj):
-    return _command("SET", key, json.dumps(obj, separators=(",", ":")))
+    if not configured():
+        return None
+    return _command('SET', key, json.dumps(obj, separators=(',', ':')))
 
 
 def get_json(key, default=None):
-    raw = _command("GET", key)
+    if not configured():
+        return default
+    raw = _command('GET', key)
     if raw is None:
         return default
     return json.loads(raw)

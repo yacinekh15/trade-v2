@@ -1,216 +1,105 @@
-"""Long-only spot entry engine.
-
-Signals implemented exactly as the current project rules:
-1) EMA200_RECLAIM:
-   - the two immediately preceding CLOSED candles both closed below EMA200
-   - the signal candle CLOSED above EMA200
-2) BULLISH_DIVERGENCE:
-   - price is above EMA200
-   - two confirmed pivot lows form a lower low in price and a higher low in RSI
-   - the current closed candle is a 5-candle bullish confirmation:
-     its close is above the closes of the four preceding closed candles.
-
-No shorts, futures, leverage, MACD, EMA20/50, or sell-short logic is used.
+"""Setup detection, risk validation and transparent 0-100 scoring.
+No signal is a probability or guarantee. All decisions use closed candles only.
 """
-from indicators_engine import compute_ema_series, compute_rsi_series, compute_atr
+from indicators_engine import *
+from config import MAX_RISK_PCT,MIN_STOP_ATR,EXTENSION_ATR,ALERT_MIN_SCORE
 
-TRADE_SETUPS = {"EMA200_RECLAIM", "BULLISH_DIVERGENCE"}
-PIVOT_LEFT = 2
-PIVOT_RIGHT = 2
-RSI_PERIOD = 14
-SWING_LOOKBACK = 80
+ALL_SETUPS={
+ 'BULLISH_BREAKOUT','EARLY_MOMENTUM_SURGE','BULLISH_PULLBACK','SUPPORT_BOUNCE',
+ 'EMA_BULLISH_CROSSOVER','EMA200_RECLAIM','RSI_DIVERGENCE_PULLBACK','BULLISH_REVERSAL',
+ 'EMA20_50_CONVERGENCE','VOLUME_EXPANSION','FAKEOUT'
+}
+TRADE_SETUPS={'BULLISH_BREAKOUT','EARLY_MOMENTUM_SURGE','BULLISH_PULLBACK','SUPPORT_BOUNCE','EMA_BULLISH_CROSSOVER','EMA200_RECLAIM','RSI_DIVERGENCE_PULLBACK','BULLISH_REVERSAL'}
+PIVOT_LEFT=PIVOT_RIGHT=2
 
+def _r(v,d=8): return None if v is None else round(float(v),d)
 
-def _round(v, d=8):
-    return None if v is None else round(float(v), d)
+def _pivots(candles,rsi,left=2,right=2):
+    out=[]
+    for i in range(left,len(candles)-right):
+        lo=candles[i]['low']
+        if all(lo<candles[j]['low'] for j in range(i-left,i)) and all(lo<=candles[j]['low'] for j in range(i+1,i+right+1)) and rsi[i] is not None: out.append(i)
+    return out
 
-
-def _pivot_lows(candles, rsi, left=2, right=2, start=0, end=None):
-    end = len(candles) if end is None else end
-    pivots = []
-    for i in range(max(start, left), min(end - right, len(candles) - right)):
-        low = candles[i]["low"]
-        if all(low < candles[j]["low"] for j in range(i-left, i)) and \
-           all(low <= candles[j]["low"] for j in range(i+1, i+right+1)):
-            if rsi[i] is not None:
-                pivots.append(i)
-    return pivots
-
-
-def _find_bullish_divergence(candles, rsi):
-    """Return the latest valid pivot pair if regular bullish divergence exists.
-
-    Both pivots are confirmed (two candles to the right). The second pivot must
-    be recent enough to represent the current correction, and the signal candle
-    comes after it.
-    """
-    end = len(candles) - 1  # leave the signal candle out of pivot formation
-    pivots = _pivot_lows(candles, rsi, PIVOT_LEFT, PIVOT_RIGHT, max(0, end-SWING_LOOKBACK), end)
-    if len(pivots) < 2:
-        return None
-    p2 = pivots[-1]
-    # Require the second pivot to be within the recent correction window.
-    if end - p2 > 20:
-        return None
-    for k in range(len(pivots)-2, -1, -1):
-        p1 = pivots[k]
-        price_lower_low = candles[p2]["low"] < candles[p1]["low"]
-        rsi_higher_low = rsi[p2] > rsi[p1]
-        if price_lower_low and rsi_higher_low:
-            return {
-                "first_pivot": p1,
-                "second_pivot": p2,
-                "price_1": candles[p1]["low"],
-                "price_2": candles[p2]["low"],
-                "rsi_1": rsi[p1],
-                "rsi_2": rsi[p2],
-            }
+def _divergence(candles,rsi,min_delta=1.0):
+    piv=_pivots(candles,rsi)
+    if len(piv)<2:return None
+    p2=piv[-1]
+    if len(candles)-1-p2>2:return None
+    for p1 in reversed(piv[:-1]):
+        gap=p2-p1
+        if gap<5: continue
+        if gap>30: break
+        if candles[p2]['low']<candles[p1]['low'] and rsi[p2]>rsi[p1]+min_delta:
+            if min(c['low'] for c in candles[p1+1:p2])>=candles[p2]['low']:
+                if rsi[p1]<45:
+                    return {'p1':p1,'p2':p2,'price_1':candles[p1]['low'],'price_2':candles[p2]['low'],'rsi_1':rsi[p1],'rsi_2':rsi[p2]}
     return None
 
+def _five_pattern(candles):
+    # Source specification: 2 candles before pivot + pivot + 2 after; signal=N=i+2.
+    # At N the pivot is known and no future candle is used. The confirmation is the
+    # confirmed fractal itself, not an invented directional candle rule.
+    return len(candles)>=5
 
-def _five_candle_confirmation(candles):
-    """Conservative machine-readable interpretation of the video's 5-candle rule.
+def _risk(price,stop,atr):
+    R=price-stop
+    if price<=0 or stop<=0 or R<=0:return False,['invalid stop'],R
+    reasons=[]
+    if R/price>MAX_RISK_PCT: reasons.append(f'risk {R/price:.2%} exceeds {MAX_RISK_PCT:.0%}')
+    if atr and R<MIN_STOP_ATR*atr: reasons.append('stop is tighter than 0.5 ATR')
+    return not reasons,reasons,R
 
-    The signal is the fifth candle: it must be bullish and close above the
-    closes of the four candles immediately before it.
-    """
-    if len(candles) < 5:
-        return False
-    five = candles[-5:]
-    return five[-1]["close"] > five[-1]["open"] and \
-           five[-1]["close"] > max(c["close"] for c in five[:-1])
-
-
-def _swing_low_for_sl(candles, divergence=None):
-    lows = [c["low"] for c in candles[-12:]]
-    if divergence:
-        p = divergence["second_pivot"]
-        lows = [c["low"] for c in candles[max(0, p-2):p+3]]
-    return min(lows)
-
-
-def _score(ema_reclaim, divergence, above_ema, confirmation, rr):
-    score = 0
-    if above_ema: score += 25
-    if ema_reclaim: score += 35
-    if divergence: score += 30
-    if confirmation: score += 10
-    if rr >= 2: score += 5
-    return min(100, score)
-
-
-def score_symbol(symbol, candles):
-    # Binance returns the newest candle, which may still be forming.
-    if not candles or len(candles) < 210:
-        return None
-    closed = candles[:-1]
-    if len(closed) < 205:
-        return None
-
-    closes = [float(c["close"]) for c in closed]
-    ema200 = compute_ema_series(closes, 200)
-    rsi = compute_rsi_series(closes, RSI_PERIOD)
-    if ema200[-1] is None or rsi[-1] is None:
-        return None
-
-    price = closes[-1]
-    ema = ema200[-1]
-    prev_ema = ema200[-2]
-    # Exact reclaim rule: the two candles before the signal candle closed below EMA200.
-    below_1 = closes[-2] < ema200[-2]
-    below_2 = closes[-3] < ema200[-3]
-    ema_reclaim = below_1 and below_2 and price > ema and closes[-2] <= prev_ema
-
-    divergence = _find_bullish_divergence(closed, rsi)
-    above_ema = price > ema
-    confirmation = _five_candle_confirmation(closed)
-
-    setup = None
-    reasons = []
-    if ema_reclaim:
-        setup = "EMA200_RECLAIM"
-        reasons = [
-            "Previous 2 closed candles were below EMA200",
-            "Current closed candle reclaimed EMA200",
-            "Signal is long-only / spot",
-        ]
-    elif divergence and above_ema and confirmation:
-        setup = "BULLISH_DIVERGENCE"
-        reasons = [
-            "Price is above EMA200",
-            "Regular bullish RSI divergence detected",
-            "5-candle bullish confirmation closed",
-        ]
-
-    # Levels use actual recent structure, not arbitrary fixed percentages.
-    swing_low = _swing_low_for_sl(closed, divergence)
-    # A tiny structural buffer reduces same-candle noise without manufacturing a target.
-    risk_buffer = max((price - swing_low) * 0.03, price * 0.0005)
-    sl = swing_low - risk_buffer
-    if sl <= 0 or sl >= price:
-        sl = price * 0.98
-    risk = price - sl
-    tp_2r = price + 2 * risk
-    tp_3r = price + 3 * risk
-
-    # Divergence signal is only eligible when all its stated conditions pass.
-    qualified = setup in TRADE_SETUPS
-    rr = 2.0
-
-    if setup == "EMA200_RECLAIM":
-        reasons.append(f"Stop below recent swing low: {sl:.8g}")
-    elif setup == "BULLISH_DIVERGENCE":
-        reasons.append(f"Price low {divergence['price_2']:.8g} < {divergence['price_1']:.8g}")
-        reasons.append(f"RSI low {divergence['rsi_2']:.2f} > {divergence['rsi_1']:.2f}")
-        reasons.append(f"Stop below divergence swing low: {sl:.8g}")
-
-    score = _score(ema_reclaim, bool(divergence), above_ema, confirmation, rr)
-    if not qualified:
-        score = max(score, 0)
-
-    return {
-        "symbol": symbol,
-        "price": _round(price),
-        "score": score,
-        "entry_quality": score,
-        "qualified": qualified,
-        "setup_type": setup or "NO_SIGNAL",
-        "direction": "LONG" if qualified else "NONE",
-        "timeframe": None,
-        "reasons": reasons or ["No qualifying long setup"],
-        "rejection_reasons": [] if qualified else [
-            "Waiting for EMA200 reclaim or bullish divergence confirmation"
-        ],
-        "analysis": {
-            "bias": "LONG" if qualified else "WAIT",
-            "setup": setup or "NO_SIGNAL",
-            "entry": {"low": _round(price), "high": _round(price)},
-            "sl": _round(sl),
-            "tp": [
-                {"level": _round(tp_2r), "rr": 2.0, "reason": "2R reference target"},
-                {"level": _round(tp_3r), "rr": 3.0, "reason": "3R reference target"},
-            ],
-            "rr_tp1": 2.0,
-            "rule_passed": qualified,
-            "confidence": "Rule-confirmed" if qualified else "Waiting",
-            "invalidation": f"Long thesis invalid below {sl:.8g}.",
-            "counter_argument": "A confirmed setup can still fail; the scanner does not predict profit.",
-            "historical": "[Not a backtest result] Strategy rules are derived from the supplied video summaries.",
-        },
-        "indicators": {
-            "ema200": _round(ema),
-            "ema200_prev": _round(prev_ema),
-            "rsi": _round(rsi[-1], 2),
-            "rsi_prev": _round(rsi[-2], 2),
-            "price_above_ema200": above_ema,
-            "ema200_reclaim": ema_reclaim,
-            "two_closes_below_ema200": below_1 and below_2,
-            "bullish_divergence": bool(divergence),
-            "five_candle_confirmation": confirmation,
-            "swing_low": _round(swing_low),
-            "risk": _round(risk),
-            "tp_2r": _round(tp_2r),
-            "tp_3r": _round(tp_3r),
-            "divergence": divergence,
-        },
-    }
+def score_symbol(symbol,candles,quote_volume=0,timeframe='1h',mtf=None):
+    if not candles or len(candles)<250:return None
+    # Closed-only: the data client already drops forming candles, but retain a defensive check.
+    closed=[c for c in candles if c.get('close_time',0)<=__import__('time').time()*1000]
+    if len(closed)<250:return None
+    cs=[c['close'] for c in closed]; highs=[c['high'] for c in closed]; vols=[c['volume'] for c in closed]
+    ema20=compute_ema_series(cs,20); ema50=compute_ema_series(cs,50); ema200=compute_ema_series(cs,200); rsi=compute_rsi_series(cs,14)
+    macd,macd_sig,macd_hist=compute_macd_series(cs); atr=compute_atr_series(closed); vr=compute_volume_ratio_series(vols); vwap=compute_session_vwap(closed); support,resistance=compute_zones(closed)
+    i=len(closed)-1; price=cs[i]; e20=ema20[i]; e50=ema50[i]; e200=ema200[i]; a=atr[i]; rv=rsi[i]; hist=macd_hist[i]; prev_hist=macd_hist[i-1] if i else None
+    ema_cross=i>0 and ema20[i-1] is not None and ema50[i-1] is not None and ema20[i-1]<=ema50[i-1] and e20>e50
+    gap=abs(e20-e50)/e50 if e50 else 1; convergence=gap<=0.0005
+    below2=cs[i-1]<ema200[i-1] and cs[i-2]<ema200[i-2]
+    reclaim=below2 and price>e200
+    div=_divergence(closed,rsi)
+    div_valid=bool(div and price>e200 and _five_pattern(closed))
+    support_bounce=bool(support and closed[i]['low']<=support['high'] and price>closed[i]['open'] and rv is not None and rv>45)
+    breakout=bool(resistance and price>resistance['high'] and (vr[i] or 0)>=1.5 and price>e20>e50)
+    surge=bool(vr[i] and vr[i]>=1.5 and price>closed[i]['open'] and e20>e50 and hist is not None and prev_hist is not None and hist>prev_hist and price-e20 <= (a or 1)*3)
+    pullback=bool(price>e200 and e20>e50 and (closed[i]['low']<=e20 or (support and closed[i]['low']<=support['high'])) and price>closed[i]['open'])
+    reversal=bool(price>e200 and reclaim and (vr[i] or 0)>=1.2 and hist is not None and hist>prev_hist if prev_hist is not None else False)
+    fakeout=bool(resistance and highs[i-1]>resistance['high'] and price<resistance['high'])
+    extension=bool(a and (price-e20)/a>EXTENSION_ATR)
+    setup=None; evidence=[]
+    if reclaim: setup='EMA200_RECLAIM'; evidence=['2 prior closes below their own EMA200','closed candle reclaimed EMA200']
+    elif div_valid: setup='RSI_DIVERGENCE_PULLBACK'; evidence=['regular bullish RSI divergence','pivot confirmation (5-candle fractal)','price above EMA200']
+    elif breakout: setup='BULLISH_BREAKOUT'; evidence=['closed resistance break','volume >= 1.5x','supportive EMA structure']
+    elif surge: setup='EARLY_MOMENTUM_SURGE'; evidence=['strong closed-candle momentum','volume >= 1.5x','EMA20 > EMA50','MACD histogram strengthening','not >3 ATR extended']
+    elif pullback: setup='BULLISH_PULLBACK'; evidence=['established uptrend','pullback to EMA/support','bullish close']
+    elif support_bounce: setup='SUPPORT_BOUNCE'; evidence=['reaction at support zone','bullish confirmation']
+    elif ema_cross: setup='EMA_BULLISH_CROSSOVER'; evidence=['EMA20 crossed above EMA50']
+    elif reversal: setup='BULLISH_REVERSAL'; evidence=['multiple independent bullish pieces of evidence']
+    elif convergence: setup='EMA20_50_CONVERGENCE'; evidence=['EMA20/EMA50 distance <= 0.05%'];
+    elif (vr[i] or 0)>=1.2: setup='VOLUME_EXPANSION'; evidence=[f'volume ratio {vr[i]:.2f}x']
+    elif fakeout: setup='FAKEOUT'; evidence=['breakout failed back below resistance']
+    else: setup='NO_SIGNAL'
+    # stop logic per setup
+    if setup=='EMA200_RECLAIM':
+        run=[]; j=i-1
+        while j>=0 and cs[j]<ema200[j] and len(run)<60: run.append(j); j-=1
+        stop=min(closed[k]['low'] for k in run) if run else min(c['low'] for c in closed[-12:])
+    elif div: stop=closed[div['p2']]['low']-(a or price*0.01)*0.1
+    else: stop=min(c['low'] for c in closed[-12:])
+    valid,risk_reasons,R=_risk(price,stop,a or 0)
+    tp2=price+2*R if R>0 else None; tp3=price+3*R if R>0 else None
+    score_parts={'trend':20 if price>e200 else 0,'momentum':15 if ((hist is not None and hist>0) or div_valid) else 0,'volume':15 if (vr[i] or 0)>=1.2 else 0,'structure':15 if (breakout or support_bounce or pullback or reclaim or div_valid) else 0,'mtf':15 if (not mtf or mtf.get('bullish_count',0)>=1) else 0,'setup_quality':15 if setup in TRADE_SETUPS else 0,'risk_volatility':5 if valid else 0}
+    penalty=0
+    if extension: penalty+=35
+    if mtf and mtf.get('strong_contradiction'): penalty+=25
+    if quote_volume and quote_volume<5000000: penalty+=20
+    score=max(0,min(100,sum(score_parts.values())-penalty))
+    telegram_ok=setup in TRADE_SETUPS and valid and not extension and not (mtf and mtf.get('strong_contradiction')) and score>=ALERT_MIN_SCORE and (vr[i] or 0)>=1.2
+    qualified=setup in TRADE_SETUPS and valid and not extension
+    return {'symbol':symbol,'timeframe':timeframe,'direction':'LONG' if qualified else 'NONE','setup_type':setup,'qualified':qualified,'telegram_eligible':telegram_ok,'score':score,'price':_r(price),'quote_volume':quote_volume,'signal_time':closed[i]['open_time'],'reasons':evidence,'rejection_reasons':risk_reasons if not valid else ([] if qualified else ['setup is informational or lacks full confirmation']),'indicators':{'ema20':_r(e20),'ema50':_r(e50),'ema200':_r(e200),'rsi':_r(rv,2),'macd':_r(macd[i]),'macd_signal':_r(macd_sig[i]),'macd_histogram':_r(hist),'atr':_r(a),'volume_ratio':_r(vr[i],2),'vwap':_r(vwap[i]),'support_zone':support,'resistance_zone':resistance,'ema20_50_convergence':convergence,'ema_bullish_crossover':ema_cross,'extension':extension,'extension_atr':_r((price-e20)/a,2) if a else None,'divergence':div,'two_closes_below_ema200':below2,'ema200_reclaim':reclaim},'analysis':{'bias':'LONG' if qualified else 'WATCH','entry':{'low':_r(price),'high':_r(price)},'sl':_r(stop),'tp':[{'level':_r(tp2),'rr':2},{'level':_r(tp3),'rr':3}],'risk_pct':_r(R/price*100,2) if price else None,'invalidation':f'Long thesis invalid below {_r(stop)}.','counter_argument':'A setup can fail; score measures rule alignment, not probability.','historical':'Not a backtest result.','score_breakdown':score_parts,'penalties':{'extension':35 if extension else 0,'contradiction':25 if mtf and mtf.get('strong_contradiction') else 0,'illiquidity':20 if quote_volume and quote_volume<5000000 else 0},'total_score':score}}

@@ -1,40 +1,20 @@
-# Halal Spot Scanner — Long Only
+# Trade-HHJ — Manual Binance Spot Scanner
 
-## Strategy rules
+This project follows the supplied Trade-HHJ specification. It is decision-support only and never places real trades.
 
-### 1. EMA200 Reclaim
-A signal is generated only on a **closed candle** when:
-- The two immediately preceding closed candles both closed below their EMA200.
-- The current closed candle closes above its EMA200.
-- Direction is LONG only.
+## Core behavior
+- Binance **Spot** public data only.
+- `coins.txt` is the authoritative user-provided universe.
+- Manual **SCAN NOW** only. No cron and no automatic scanner.
+- Long-side setups and caution/watch states; no short execution logic.
+- Closed candles only; no look-ahead in setup detection/backtesting.
+- Liquidity filter defaults to 5M USDT 24h quote volume.
+- Indicators: EMA20/50/200, RSI14 Wilder, MACD, ATR14, volume ratio, support/resistance zones, session VWAP.
+- Setups A/B exactly follow the supplied 200 EMA reclaim and RSI divergence rules; the other documented long/watch setups are also implemented.
+- Transparent 0–100 alignment score, never a probability.
+- Selective Telegram is server-side and optional.
+- Paper trades are stored; no real orders exist.
+- Backtesting enters at next candle open and applies fees; Setup A uses EMA200 trailing behavior.
 
-### 2. Bullish RSI Divergence
-A signal is generated only when:
-- Price is above EMA200.
-- Two confirmed pivot lows form a regular bullish divergence:
-  price makes a lower low while RSI(14) makes a higher low.
-- The current closed candle passes the conservative 5-candle confirmation:
-  it is bullish and closes above the previous four closes.
-
-### Risk levels
-- Entry = signal candle close.
-- SL = below the relevant recent/divergence swing low.
-- TP references = 2R and 3R.
-
-## Scanner behavior
-- Spot / long only.
-- No shorts, futures, leverage, MACD, EMA20/50, or automatic orders.
-- Open candles are ignored.
-- Manual Scan Now.
-- Server-side Auto Scanner toggle and interval.
-- Telegram toggle for qualifying alerts.
-- Telegram cooldown prevents repeated alerts for the same symbol/setup/timeframe.
-
-## Deployment
-Set:
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `SCAN_SECRET`
-- Upstash variables if persistent auto-scan state is desired.
-
-GitHub Actions calls `/api/auto-scan` every 5 minutes; the server-side Auto Scanner setting decides whether a scan is due.
+## Security
+Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and optional `SCAN_SECRET` as server-side environment variables.

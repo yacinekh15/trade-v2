@@ -1,96 +1,40 @@
-"""Telegram alerts for the two approved long-only spot setups."""
-import time
-import requests
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALERT_COOLDOWN_MINUTES, ALERT_MAX_PER_SCAN
-from upstash_client import get_json, set_json
-
-ALERT_STATE_KEY = "telegram_alert_state"
-
+"""Selective Telegram alerts; website toggle is server-persisted and affects sending only."""
+import time,requests
+from config import TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,ALERT_COOLDOWN_MINUTES,ALERT_MAX_PER_SCAN,ALERT_MIN_SCORE
+from upstash_client import get_json,set_json
+KEY='telegram_alert_state'
 
 def send_message(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
-    r.raise_for_status()
-    return True
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:return False
+    r=requests.post(f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage',json={'chat_id':TELEGRAM_CHAT_ID,'text':text},timeout=10); r.raise_for_status(); return True
 
+def _f(v):
+    if v is None:return '—'
+    return f'{float(v):,.8f}'.rstrip('0').rstrip('.')
 
-def _fmt(v):
-    if v is None:
-        return "—"
-    return f"{float(v):,.8f}".rstrip("0").rstrip(".")
+def _msg(r):
+    i=r['indicators']; a=r['analysis']; checks=['✓ closed candle', '✓ liquidity filter','✓ risk validation']
+    if i.get('volume_ratio',0)>=1.2:checks.append('✓ volume confirmation')
+    return (f'🟢 LONG SPOT ALERT\nSymbol: {r["symbol"]}\nTimeframe: {r["timeframe"]}\nSetup: {r["setup_type"]}\nScore: {r["score"]}/100\n\n'
+            f'Entry reference: {_f(r["price"])}\nInvalidation: {_f(a.get("sl"))}\nTP1: {_f((a.get("tp") or [{}])[0].get("level"))}\nTP2: {_f((a.get("tp") or [{},{}])[1].get("level"))}\n'
+            f'MTF: {r.get("mtf_states",{})}\nConfirmations: {", ".join(checks)}\n\nScanner reference levels only; manually verify the chart.')
 
+def check_and_alert(results,timeframe,enabled=True):
+    if not enabled:return {'sent':0,'skipped':0,'candidates':0,'enabled':False,'configured':bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)}
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:return {'sent':0,'skipped':0,'candidates':0,'enabled':True,'configured':False}
+    state=get_json(KEY,{}) or {}; now=time.time(); sent=skipped=candidates=0; changed=False
+    for r in results:
+        if not r.get('telegram_eligible') or r.get('score',0)<ALERT_MIN_SCORE:continue
+        candidates+=1; key=f'{r["symbol"]}:{timeframe}:{r["setup_type"]}:{r.get("signal_time")}'; old=state.get(key)
+        if old: skipped+=1; continue
+        if sent>=ALERT_MAX_PER_SCAN: skipped+=1; continue
+        try:
+            if send_message(_msg(r)): state[key]={'sent_at':now}; sent+=1; changed=True
+        except Exception: skipped+=1
+    # keep recent state bounded
+    if len(state)>2000: state=dict(list(state.items())[-1000:])
+    if changed:set_json(KEY,state)
+    return {'sent':sent,'skipped':skipped,'candidates':candidates,'enabled':True,'configured':True}
 
-def _message(r, tf):
-    i = r["indicators"]
-    a = r["analysis"]
-    div = i.get("divergence") or {}
-    extra = ""
-    if r["setup_type"] == "BULLISH_DIVERGENCE":
-        extra = (
-            f"\nPrice lows: `{_fmt(div.get('price_1'))}` → `{_fmt(div.get('price_2'))}`"
-            f"\nRSI lows: `{_fmt(div.get('rsi_1'))}` → `{_fmt(div.get('rsi_2'))}`"
-        )
-    return (
-        f"🟢 *LONG SPOT ALERT*\n"
-        f"Symbol: `{r['symbol']}`\nTimeframe: `{tf}`\n"
-        f"Setup: *{r['setup_type']}*\n\n"
-        f"Entry: `{_fmt(r['price'])}`\n"
-        f"EMA200: `{_fmt(i.get('ema200'))}`\n"
-        f"SL: `{_fmt(a.get('sl'))}`\n"
-        f"TP 2R: `{_fmt(i.get('tp_2r'))}`\n"
-        f"TP 3R: `{_fmt(i.get('tp_3r'))}`"
-        f"{extra}\n\n"
-        f"Rules: {'; '.join(r.get('reasons', [])[:4])}\n\n"
-        f"_Spot/long-only scanner alert. Verify the chart before trading._"
-    )
-
-
-def check_and_alert(results, timeframe, enabled=True):
-    if not enabled:
-        return {"sent": 0, "skipped": 0, "candidates": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": False}
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return {"sent": 0, "skipped": 0, "candidates": 0, "configured": False, "enabled": True}
-    state = get_json(ALERT_STATE_KEY, default={}) or {}
-    now = time.time()
-    sent = skipped = candidates = 0
-    changed = False
-    for r in sorted(results, key=lambda x: x.get("score", 0), reverse=True):
-        if not r.get("qualified") or r.get("setup_type") not in {"EMA200_RECLAIM", "BULLISH_DIVERGENCE"}:
-            continue
-        candidates += 1
-        key = f"{timeframe}:{r['symbol']}:{r['setup_type']}"
-        prev = state.get(key)
-        if isinstance(prev, dict) and now - float(prev.get("sent_at", 0)) < ALERT_COOLDOWN_MINUTES * 60:
-            skipped += 1
-            continue
-        if sent >= ALERT_MAX_PER_SCAN:
-            skipped += 1
-            continue
-        if send_message(_message(r, timeframe)):
-            state[key] = {"sent_at": now, "score": r.get("score", 0)}
-            changed = True
-            sent += 1
-    if changed:
-        set_json(ALERT_STATE_KEY, state)
-    return {"sent": sent, "skipped": skipped, "candidates": candidates, "configured": True, "enabled": True, "max_per_scan": ALERT_MAX_PER_SCAN}
-
-
-def check_and_alert_mtf(scan_payloads, enabled=True):
-    if not enabled:
-        return {"sent": 0, "skipped": 0, "candidates": 0, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": False}
-    sent = skipped = candidates = 0
-    # Use the existing per-timeframe cooldown state; scan high timeframes first.
-    for tf in ["4h", "1h", "15m", "5m"]:
-        payload = scan_payloads.get(tf)
-        if not payload:
-            continue
-        remaining = max(0, ALERT_MAX_PER_SCAN - sent)
-        if remaining == 0:
-            break
-        result = check_and_alert(payload.get("results", []), tf, enabled=True)
-        sent += result.get("sent", 0)
-        skipped += result.get("skipped", 0)
-        candidates += result.get("candidates", 0)
-    return {"sent": sent, "skipped": skipped, "candidates": candidates, "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "enabled": True}
+def check_and_alert_mtf(results,enabled=True):
+    return check_and_alert(results,'ALL',enabled)
