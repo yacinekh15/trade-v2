@@ -1,5 +1,6 @@
 """FastAPI endpoints for Trade-HHJ long-only Binance Spot scanner."""
 import os,sys,time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,ROOT)
 from fastapi import FastAPI,Header,HTTPException,Query
 from pydantic import BaseModel,Field
@@ -29,22 +30,43 @@ def do_scan(tf,symbols,telegram_enabled=False):
         for r in results:
             if not r.get('telegram_eligible'): continue
             states={tf:'bullish' if r.get('qualified') else 'neutral'}; bear=0; bull=1 if r.get('qualified') else 0
-            for htf in higher:
-                try:
-                    hc=d['get_klines'](r['symbol'],htf,d['CANDLE_LOOKBACK'])
-                    hr=d['score_symbol'](r['symbol'],hc,0,htf) if False else None
-                    # Import directly to keep the stage-2 path explicit.
-                    from setup_score import score_symbol
-                    hr=score_symbol(r['symbol'],hc,0,htf)
-                    states[htf]='bullish' if hr and hr.get('qualified') else ('bearish' if hr and hr.get('setup_type')=='FAKEOUT' else 'neutral')
-                    bull += states[htf]=='bullish'; bear += states[htf]=='bearish'
-                except Exception: states[htf]='neutral'
+            # Stage-2 MTF confirmation is parallelized because 15m candidates
+            # can require both 1h and 4h candles. A slow sequential path can
+            # exceed Vercel's function timeout. Failures remain neutral rather
+            # than turning the whole scan into a 500/timeout.
+            from setup_score import score_symbol
+            def _check_htf(htf):
+                hc=d['get_klines'](r['symbol'],htf,d['CANDLE_LOOKBACK'])
+                return htf, score_symbol(r['symbol'],hc,0,htf)
+            with ThreadPoolExecutor(max_workers=min(2,len(higher))) as pool:
+                futures=[pool.submit(_check_htf,htf) for htf in higher]
+                for f in as_completed(futures):
+                    try:
+                        htf,hr=f.result()
+                        states[htf]='bullish' if hr and hr.get('qualified') else ('bearish' if hr and hr.get('setup_type')=='FAKEOUT' else 'neutral')
+                    except Exception:
+                        # Recover the timeframe name even when the request fails.
+                        htf = higher[futures.index(f)]
+                        states[htf]='neutral'
+            bull=sum(v=='bullish' for v in states.values())
+            bear=sum(v=='bearish' for v in states.values())
             r['mtf_states']=states
             if bear>=2 or (tf=='1h' and states.get('4h')=='bearish'):
                 r['telegram_eligible']=False; r['analysis']['penalties']['contradiction']=25; r['score']=max(0,r['score']-25)
-    alerts=d['check_and_alert'](results,tf,enabled=telegram_enabled)
+    # Alerting must never turn a successful market scan into HTTP 500.
+    try:
+        alerts=d['check_and_alert'](results,tf,enabled=telegram_enabled)
+    except Exception as e:
+        alerts=[]
+        for r in results:
+            r.setdefault('analysis',{}).setdefault('warnings',[]).append(f'Telegram error: {e}')
     payload={'status':'ok' if not failed else 'partial','timeframe':tf,'updated_at':time.time(),'duration_seconds':round(time.time()-started,2),'coin_count':len(symbols),'successful_count':len(results),'failed_count':len(failed),'skipped_count':len(skipped),'failed': [{'symbol':s,'reason':e} for s,e in failed], 'skipped':[{'symbol':s,'reason':e} for s,e in skipped], 'results':results,'alerts':alerts}
-    persist(d,tf,payload); return payload
+    # Persistence is best-effort: scanner results remain usable without Redis.
+    try:
+        persist(d,tf,payload)
+    except Exception as e:
+        payload['persistence_warning']=str(e)
+    return payload
 
 @app.get('/api/health')
 async def health():
@@ -68,7 +90,12 @@ async def scan(timeframe:str=Query('1h'),symbols:str=Query(''),telegram:int=Quer
     universe=d['load_coins'](); chosen=[s.strip().upper() for s in symbols.split(',') if s.strip()] if symbols else universe
     chosen=[s for s in chosen if s in universe]
     if not chosen: raise HTTPException(400,'No valid symbols selected')
-    p=do_scan(timeframe,chosen,bool(telegram)); return {'ok':True,**p}
+    try:
+        p=do_scan(timeframe,chosen,bool(telegram))
+        return {'ok':True,**p}
+    except Exception as e:
+        # Return a useful API error instead of an opaque Vercel 500.
+        raise HTTPException(502,f'Scan engine error: {type(e).__name__}: {e}')
 
 @app.post('/api/scan-all')
 async def scan_all(timeframes:str=Query('1h,4h'),symbols:str=Query(''),telegram:int=Query(0,ge=0,le=1),secret:str=Query(''),x_scan_secret:str=Header('',alias='X-Scan-Secret')):

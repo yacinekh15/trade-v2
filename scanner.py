@@ -2,9 +2,22 @@
 from binance_data import get_klines_batch,get_tickers
 from setup_score import score_symbol
 from config import DEFAULT_MIN_QUOTE_VOLUME
+import time
+
+_TICKER_CACHE = None
+_TICKER_CACHE_AT = 0.0
+_TICKER_CACHE_TTL = 20.0
+
+def _cached_tickers():
+    global _TICKER_CACHE, _TICKER_CACHE_AT
+    now=time.time()
+    if _TICKER_CACHE is None or now-_TICKER_CACHE_AT > _TICKER_CACHE_TTL:
+        _TICKER_CACHE=get_tickers()
+        _TICKER_CACHE_AT=now
+    return _TICKER_CACHE
 
 def run_scan(symbols,timeframe,candle_lookback,min_quote_volume=DEFAULT_MIN_QUOTE_VOLUME):
-    tickers=get_tickers()
+    tickers=_cached_tickers()
     eligible=[]; skipped=[]
     for s in symbols:
         t=tickers.get(s)

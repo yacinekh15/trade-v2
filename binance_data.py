@@ -14,9 +14,17 @@ def _get(url,params=None,attempts=3):
             if n==attempts-1: raise
             time.sleep(0.7*(n+1))
 
+_TICKER_CACHE={'ts':0,'data':{}}
+
 def get_tickers():
+    # Cache the 24h ticker list briefly; every scanner batch does not need a new request.
+    now=time.time()
+    if _TICKER_CACHE['data'] and now-_TICKER_CACHE['ts'] < 20:
+        return _TICKER_CACHE['data']
     rows=_get(f'{BINANCE_BASE_URL}/api/v3/ticker/24hr')
-    return {x['symbol']:{'quote_volume':float(x.get('quoteVolume',0)),'last_price':float(x.get('lastPrice',0)),'price_change_pct':float(x.get('priceChangePercent',0))} for x in rows if x.get('symbol','').endswith('USDT')}
+    data={x['symbol']:{'quote_volume':float(x.get('quoteVolume',0)),'last_price':float(x.get('lastPrice',0)),'price_change_pct':float(x.get('priceChangePercent',0))} for x in rows if x.get('symbol','').endswith('USDT')}
+    _TICKER_CACHE.update(ts=now,data=data)
+    return data
 
 def validate_symbols(symbols):
     try:
