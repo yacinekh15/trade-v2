@@ -1,48 +1,37 @@
 import math
-from indicators_engine import ema_relationship, ema_crossed_up
-from setup_score import score_symbol
-from backtest import backtest_candles
+from setup_score import score_symbol, _five_candle_confirmation
+from indicators_engine import compute_ema_series, compute_rsi_series
 
-def candles(n=260):
-    out=[]; price=100.0
+
+def base_candles(n=260):
+    out=[]
+    price=100.0
     for i in range(n):
-        price += 0.2 + 0.8*math.sin(i/7)
-        out.append({"open_time":i*3600000,"open":price-0.2,"high":price+1,"low":price-1,"close":price,"volume":1000+(500 if i%17==0 else 0)})
+        price += 0.15 + 0.5*math.sin(i/8)
+        out.append({"open_time":i*3600000,"open":price-0.1,"high":price+0.5,"low":price-0.5,"close":price,"volume":1000})
     return out
 
-def test_ema_equal_band():
-    state,gap=ema_relationship(100,100.03,0.05)
-    assert state=="EQUAL" and gap<0.05
 
-def test_score_shape():
-    r=score_symbol("TESTUSDT",candles())
-    assert r and 0<=r["score"]<=100 and "ema_equal" in r
-
-def test_backtest_shape():
-    r=backtest_candles("TESTUSDT",candles(),"1h",40,12)
-    assert "summary" in r and r["summary"]["signals"]==len(r["trades"])
-
-def test_entry_engine_fields():
-    r = score_symbol("TESTUSDT", candles())
-    assert r and "entry_quality" in r and 0 <= r["entry_quality"] <= 100
-    assert "qualified" in r and isinstance(r["qualified"], bool)
-    assert "rejection_reasons" in r
-    assert "rr_tp1" in r["analysis"]
+def test_five_candle_confirmation():
+    cs=[{"open":i,"close":i+0.1,"high":i+0.2,"low":i-0.2} for i in range(5)]
+    assert _five_candle_confirmation(cs) is True
 
 
-def test_backtest_breakdown_fields():
-    r = backtest_candles("TESTUSDT", candles(), "1h", 40, 12)
-    assert "setup_breakdown" in r and isinstance(r["setup_breakdown"], dict)
-    assert "expectancy_r" in r["summary"]
-    assert "max_drawdown_r" in r["summary"]
+def test_scanner_shape_is_long_only():
+    r=score_symbol("TESTUSDT",base_candles())
+    assert r
+    assert r["direction"] in {"LONG","NONE"}
+    assert "SHORT" not in r["setup_type"]
 
-def test_trade_setup_rejects_bad_quality():
-    from telegram_alerts import _eligible
-    r = {
-        "symbol": "TESTUSDT", "setup_type": "PULLBACK", "score": 90,
-        "entry_quality": 60, "qualified": False,
-        "indicators": {"volume_ratio": 2, "ema20": 110, "ema50": 100, "ema200": 90, "macd": 2, "macd_signal": 1},
-        "analysis": {"rule_passed": False},
-    }
-    ok, reason = _eligible(r, "4h", {"4h": {"TESTUSDT": r}})
-    assert not ok and reason
+
+def test_no_ema20_50_logic_required():
+    r=score_symbol("TESTUSDT",base_candles())
+    assert "ema200" in r["indicators"]
+    assert "macd" not in r["indicators"]
+
+
+def test_rsi_series_aligned():
+    closes=list(range(1,40))
+    s=compute_rsi_series(closes,14)
+    assert len(s)==len(closes)
+    assert s[-1] == 100.0

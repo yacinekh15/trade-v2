@@ -126,3 +126,25 @@ def ema_crossed_down(series20, series50):
     a0, b0 = series20[-2], series50[-2]
     a1, b1 = series20[-1], series50[-1]
     return None not in (a0, b0, a1, b1) and a0 >= b0 and a1 < b1
+
+
+def compute_rsi_series(closes, period=14):
+    """RSI value aligned to each close; None until enough history exists."""
+    out = [None] * len(closes)
+    if len(closes) < period + 1:
+        return out
+    gains = [max(closes[i] - closes[i-1], 0.0) for i in range(1, len(closes))]
+    losses = [max(closes[i-1] - closes[i], 0.0) for i in range(1, len(closes))]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    def value():
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - 100 / (1 + rs)
+    out[period] = value()
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        out[i + 1] = value()
+    return out
