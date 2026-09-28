@@ -1,4 +1,4 @@
-"""FastAPI endpoints for Trade-HHJ manual scanner. No scheduled or automatic scans."""
+"""FastAPI endpoints for Trade-HHJ long-only Binance Spot scanner."""
 import os,sys,time
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,ROOT)
 from fastapi import FastAPI,Header,HTTPException,Query
@@ -48,7 +48,7 @@ def do_scan(tf,symbols,telegram_enabled=False):
 
 @app.get('/api/health')
 async def health():
-    d=deps(); return {'status':'ok','upstash_configured':d['upstash_configured'](),'telegram_configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID']),'timeframes':d['TIMEFRAMES'],'coins_file':len(d['load_coins']()),'manual_scan_only':True}
+    d=deps(); return {'status':'ok','upstash_configured':d['upstash_configured'](),'telegram_configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID']),'timeframes':d['TIMEFRAMES'],'coins_file':len(d['load_coins']()),'auto_scan_supported':True,'auto_scan_interval_seconds':60}
 
 @app.get('/api/universe')
 async def universe():
