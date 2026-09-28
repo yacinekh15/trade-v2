@@ -52,3 +52,72 @@ def test_ema200_reclaim_requires_two_prior_closes():
     r=score_symbol('XUSDT',cs,10000000,'1h')
     assert r['setup_type']=='EMA200_RECLAIM' and r['qualified']
 
+
+
+def _instant_result(symbol='TESTUSDT', setup='EMA200_RECLAIM', score=20, qualified=False, signal_time=123):
+    return {
+        'symbol': symbol, 'timeframe': '1h', 'setup_type': setup, 'score': score,
+        'qualified': qualified, 'signal_time': signal_time, 'price': 100,
+        'rejection_reasons': ['risk too high'] if not qualified else [],
+        'indicators': {}, 'analysis': {'sl': 95},
+    }
+
+
+def test_instant_alert_bypasses_score(monkeypatch):
+    import telegram_alerts as ta
+    sent=[]
+    monkeypatch.setattr(ta, 'TELEGRAM_BOT_TOKEN', 'token')
+    monkeypatch.setattr(ta, 'TELEGRAM_CHAT_ID', 'chat')
+    monkeypatch.setattr(ta, 'get_json', lambda key, default=None: {})
+    monkeypatch.setattr(ta, 'set_json', lambda key, obj: None)
+    monkeypatch.setattr(ta, 'send_message', lambda text: sent.append(text) or True)
+    out=ta.check_instant_reclaim_alerts([_instant_result(score=10, qualified=False)], '1h', True)
+    assert out['sent']==1 and out['candidates']==1 and 'UNFILTERED' in sent[0]
+
+
+def test_instant_alert_ignores_other_setup(monkeypatch):
+    import telegram_alerts as ta
+    sent=[]
+    monkeypatch.setattr(ta, 'TELEGRAM_BOT_TOKEN', 'token')
+    monkeypatch.setattr(ta, 'TELEGRAM_CHAT_ID', 'chat')
+    monkeypatch.setattr(ta, 'get_json', lambda key, default=None: {})
+    monkeypatch.setattr(ta, 'set_json', lambda key, obj: None)
+    monkeypatch.setattr(ta, 'send_message', lambda text: sent.append(text) or True)
+    out=ta.check_instant_reclaim_alerts([_instant_result(setup='BULLISH_BREAKOUT', score=99, qualified=True)], '1h', True)
+    assert out['sent']==0 and out['candidates']==0 and not sent
+
+
+def test_instant_alert_deduplicates(monkeypatch):
+    import telegram_alerts as ta
+    sent=[]; state={}
+    monkeypatch.setattr(ta, 'TELEGRAM_BOT_TOKEN', 'token')
+    monkeypatch.setattr(ta, 'TELEGRAM_CHAT_ID', 'chat')
+    monkeypatch.setattr(ta, 'get_json', lambda key, default=None: state.copy())
+    monkeypatch.setattr(ta, 'set_json', lambda key, obj: state.update(obj))
+    monkeypatch.setattr(ta, 'send_message', lambda text: sent.append(text) or True)
+    r=_instant_result()
+    assert ta.check_instant_reclaim_alerts([r], '1h', True)['sent']==1
+    assert ta.check_instant_reclaim_alerts([r], '1h', True)['sent']==0
+    assert len(sent)==1
+
+
+def test_instant_alert_off_sends_nothing(monkeypatch):
+    import telegram_alerts as ta
+    sent=[]
+    monkeypatch.setattr(ta, 'TELEGRAM_BOT_TOKEN', 'token')
+    monkeypatch.setattr(ta, 'TELEGRAM_CHAT_ID', 'chat')
+    monkeypatch.setattr(ta, 'send_message', lambda text: sent.append(text) or True)
+    out=ta.check_instant_reclaim_alerts([_instant_result()], '1h', False)
+    assert out['sent']==0 and not sent
+
+
+def test_instant_dedup_namespace_is_separate(monkeypatch):
+    import telegram_alerts as ta
+    calls=[]
+    monkeypatch.setattr(ta, 'TELEGRAM_BOT_TOKEN', 'token')
+    monkeypatch.setattr(ta, 'TELEGRAM_CHAT_ID', 'chat')
+    monkeypatch.setattr(ta, 'get_json', lambda key, default=None: calls.append(('get', key)) or {})
+    monkeypatch.setattr(ta, 'set_json', lambda key, obj: calls.append(('set', key)))
+    monkeypatch.setattr(ta, 'send_message', lambda text: True)
+    ta.check_instant_reclaim_alerts([_instant_result()], '1h', True)
+    assert ('get', ta.INSTANT_KEY) in calls and ta.INSTANT_KEY != ta.KEY

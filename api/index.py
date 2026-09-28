@@ -9,7 +9,7 @@ app=FastAPI(title='Trade-HHJ Manual Spot Scanner')
 def deps():
     from config import load_coins,TIMEFRAMES,DEFAULT_TIMEFRAME,CANDLE_LOOKBACK,SCAN_SECRET,BACKTEST_DEFAULT_LIMIT,BACKTEST_MAX_LIMIT,DEFAULT_MIN_QUOTE_VOLUME,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
     from scanner import run_scan,combine_mtf
-    from telegram_alerts import check_and_alert,check_and_alert_mtf
+    from telegram_alerts import check_and_alert,check_and_alert_mtf,check_instant_reclaim_alerts
     from upstash_client import get_json,set_json,configured as upstash_configured
     from binance_data import get_klines
     from backtest import backtest_candles
@@ -22,7 +22,7 @@ def persist(d,tf,payload):
     d['set_json'](f'results:{tf}',payload)
     d['set_json'](f'scan_status:{tf}',{k:payload[k] for k in ('status','timeframe','updated_at','duration_seconds','coin_count','successful_count','failed_count','skipped_count')})
 
-def do_scan(tf,symbols,telegram_enabled=False):
+def do_scan(tf,symbols,telegram_enabled=False,instant_reclaim=False):
     d=deps(); started=time.time(); results,failed,skipped=d['run_scan'](symbols,tf,d['CANDLE_LOOKBACK'],d['DEFAULT_MIN_QUOTE_VOLUME'])
     # Two-stage confirmation for Telegram: only candidates get higher-timeframe context.
     if telegram_enabled and results:
@@ -57,10 +57,16 @@ def do_scan(tf,symbols,telegram_enabled=False):
     try:
         alerts=d['check_and_alert'](results,tf,enabled=telegram_enabled)
     except Exception as e:
-        alerts=[]
+        alerts={'sent':0,'skipped':0,'candidates':0,'enabled':telegram_enabled,'error':str(e)}
         for r in results:
             r.setdefault('analysis',{}).setdefault('warnings',[]).append(f'Telegram error: {e}')
-    payload={'status':'ok' if not failed else 'partial','timeframe':tf,'updated_at':time.time(),'duration_seconds':round(time.time()-started,2),'coin_count':len(symbols),'successful_count':len(results),'failed_count':len(failed),'skipped_count':len(skipped),'failed': [{'symbol':s,'reason':e} for s,e in failed], 'skipped':[{'symbol':s,'reason':e} for s,e in skipped], 'results':results,'alerts':alerts}
+    instant_alerts={'sent':0,'skipped':0,'candidates':0,'enabled':False,'configured':False}
+    if instant_reclaim and tf != 'ALL':
+        try:
+            instant_alerts=d['check_instant_reclaim_alerts'](results,tf,enabled=True)
+        except Exception as e:
+            instant_alerts={'sent':0,'skipped':0,'candidates':0,'enabled':True,'configured':False,'error':str(e)}
+    payload={'status':'ok' if not failed else 'partial','timeframe':tf,'updated_at':time.time(),'duration_seconds':round(time.time()-started,2),'coin_count':len(symbols),'successful_count':len(results),'failed_count':len(failed),'skipped_count':len(skipped),'failed': [{'symbol':s,'reason':e} for s,e in failed], 'skipped':[{'symbol':s,'reason':e} for s,e in skipped], 'results':results,'alerts':alerts,'instant_reclaim_alerts':instant_alerts}
     # Persistence is best-effort: scanner results remain usable without Redis.
     try:
         persist(d,tf,payload)
@@ -84,14 +90,14 @@ async def results(timeframe:str='1h'):
     return d['get_json'](f'results:{timeframe}',{'status':'no_results','timeframe':timeframe,'results':[]})
 
 @app.post('/api/scan')
-async def scan(timeframe:str=Query('1h'),symbols:str=Query(''),telegram:int=Query(0,ge=0,le=1),secret:str=Query(''),x_scan_secret:str=Header('',alias='X-Scan-Secret')):
+async def scan(timeframe:str=Query('1h'),symbols:str=Query(''),telegram:int=Query(0,ge=0,le=1),instant_reclaim:int=Query(0,ge=0,le=1),secret:str=Query(''),x_scan_secret:str=Header('',alias='X-Scan-Secret')):
     d=deps(); auth(d,secret,x_scan_secret)
     if timeframe not in d['TIMEFRAMES']: raise HTTPException(400,'invalid timeframe')
     universe=d['load_coins'](); chosen=[s.strip().upper() for s in symbols.split(',') if s.strip()] if symbols else universe
     chosen=[s for s in chosen if s in universe]
     if not chosen: raise HTTPException(400,'No valid symbols selected')
     try:
-        p=do_scan(timeframe,chosen,bool(telegram))
+        p=do_scan(timeframe,chosen,bool(telegram),bool(instant_reclaim) and timeframe != 'ALL')
         return {'ok':True,**p}
     except Exception as e:
         # Return a useful API error instead of an opaque Vercel 500.
@@ -138,3 +144,13 @@ async def telegram_status():
 @app.post('/api/telegram')
 async def telegram_toggle(enabled:bool=Query(...)):
     d=deps(); d['set_json']('telegram_enabled',bool(enabled)); return {'ok':True,'enabled':bool(enabled),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
+
+@app.get('/api/telegram/instant-reclaim')
+async def instant_reclaim_status():
+    d=deps(); state=d['get_json']('telegram_instant_reclaim_enabled',False)
+    return {'enabled':bool(state),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
+
+@app.post('/api/telegram/instant-reclaim')
+async def instant_reclaim_toggle(enabled:bool=Query(...)):
+    d=deps(); d['set_json']('telegram_instant_reclaim_enabled',bool(enabled))
+    return {'ok':True,'enabled':bool(enabled),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
