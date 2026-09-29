@@ -121,3 +121,21 @@ def test_instant_dedup_namespace_is_separate(monkeypatch):
     monkeypatch.setattr(ta, 'send_message', lambda text: True)
     ta.check_instant_reclaim_alerts([_instant_result()], '1h', True)
     assert ('get', ta.INSTANT_KEY) in calls and ta.INSTANT_KEY != ta.KEY
+
+def _divergence_candles():
+    prices=[120-i*0.15 for i in range(100)] + [106,105,104,105,107,109,108,106,105,103,104,106]
+    out=[]
+    for i,p in enumerate(prices):
+        out.append({'open_time':i*3600000,'close_time':(i+1)*3600000-1,'open':p,'high':p+1,'low':p,'close':p,'volume':10000000})
+    return out
+
+def test_bullish_rsi_divergence_is_detected():
+    cs=_divergence_candles()
+    from indicators_engine import compute_rsi_series
+    from setup_score import _divergence
+    rsi=compute_rsi_series([c['close'] for c in cs],14)
+    d=_divergence(cs,rsi)
+    assert d is not None
+    assert d['price_2'] < d['price_1']
+    assert d['rsi_2'] > d['rsi_1'] + 1.0
+

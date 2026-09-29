@@ -10,6 +10,7 @@ DEFAULT_MIN_QUOTE_VOLUME = float(os.environ.get("MIN_QUOTE_VOLUME", "5000000"))
 MAX_RISK_PCT = float(os.environ.get("MAX_RISK_PCT", "8")) / 100.0
 MIN_STOP_ATR = float(os.environ.get("MIN_STOP_ATR", "0.5"))
 EXTENSION_ATR = float(os.environ.get("EXTENSION_ATR", "3"))
+MIN_RESISTANCE_ROOM_ATR = float(os.environ.get("MIN_RESISTANCE_ROOM_ATR", "1.5"))
 ALERT_MIN_SCORE = int(os.environ.get("ALERT_MIN_SCORE", "80"))
 ALERT_MAX_PER_SCAN = int(os.environ.get("ALERT_MAX_PER_SCAN", "5"))
 ALERT_COOLDOWN_MINUTES = int(os.environ.get("ALERT_COOLDOWN_MINUTES", "240"))

@@ -30,7 +30,15 @@ def run_scan(symbols,timeframe,candle_lookback,min_quote_volume=DEFAULT_MIN_QUOT
     results=[]
     for s,c in data.items():
         r=score_symbol(s,c,tickers[s]['quote_volume'],timeframe)
-        if r: results.append(r)
+        if r:
+            results.append(r)
+            # A symbol may legitimately have both a clean EMA200 reclaim and a
+            # confirmed bullish RSI divergence on the same closed candle. Keep
+            # both setup rows so one setup cannot hide the other.
+            if r.get('indicators',{}).get('divergence') and r.get('indicators',{}).get('ema200_reclaim'):
+                div_r=score_symbol(s,c,tickers[s]['quote_volume'],timeframe,force_setup='RSI_DIVERGENCE_PULLBACK')
+                if div_r and div_r.get('setup_type')=='RSI_DIVERGENCE_PULLBACK':
+                    results.append(div_r)
     results.sort(key=lambda r:(r['telegram_eligible'],r['qualified'],r['score']),reverse=True)
     return results,failed,skipped
 

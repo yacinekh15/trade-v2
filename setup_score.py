@@ -2,7 +2,7 @@
 No signal is a probability or guarantee. All decisions use closed candles only.
 """
 from indicators_engine import *
-from config import MAX_RISK_PCT,MIN_STOP_ATR,EXTENSION_ATR,ALERT_MIN_SCORE
+from config import MAX_RISK_PCT,MIN_STOP_ATR,EXTENSION_ATR,ALERT_MIN_SCORE,MIN_RESISTANCE_ROOM_ATR
 
 ALL_SETUPS={
  'BULLISH_BREAKOUT','EARLY_MOMENTUM_SURGE','BULLISH_PULLBACK','SUPPORT_BOUNCE',
@@ -50,7 +50,7 @@ def _risk(price,stop,atr):
     if atr and R<MIN_STOP_ATR*atr: reasons.append('stop is tighter than 0.5 ATR')
     return not reasons,reasons,R
 
-def score_symbol(symbol,candles,quote_volume=0,timeframe='1h',mtf=None):
+def score_symbol(symbol,candles,quote_volume=0,timeframe='1h',mtf=None,force_setup=None):
     if not candles or len(candles)<250:return None
     # Closed-only: the data client already drops forming candles, but retain a defensive check.
     closed=[c for c in candles if c.get('close_time',0)<=__import__('time').time()*1000]
@@ -72,8 +72,24 @@ def score_symbol(symbol,candles,quote_volume=0,timeframe='1h',mtf=None):
     reversal=bool(price>e200 and reclaim and (vr[i] or 0)>=1.2 and hist is not None and hist>prev_hist if prev_hist is not None else False)
     fakeout=bool(resistance and highs[i-1]>resistance['high'] and price<resistance['high'])
     extension=bool(a and (price-e20)/a>EXTENSION_ATR)
+    # Resistance is descriptive only. It must never suppress a detected setup.
+    resistance_room_atr=None
+    resistance_too_close=False
+    if resistance and a and price < resistance['low']:
+        resistance_room_atr=(resistance['low']-price)/a
+        resistance_too_close=resistance_room_atr < MIN_RESISTANCE_ROOM_ATR
+    elif resistance and resistance['low'] <= price <= resistance['high']:
+        resistance_room_atr=0.0
+        # Price is inside the resistance zone: this is a chase/poor spot entry.
+        resistance_too_close=True
+    elif resistance and price > resistance['high']:
+        # Resistance has already been cleared; the old zone is behind price.
+        resistance_room_atr=None
+        resistance_too_close=False
     setup=None; evidence=[]
-    if reclaim: setup='EMA200_RECLAIM'; evidence=['2 prior closes below their own EMA200','closed candle reclaimed EMA200']
+    if force_setup=='RSI_DIVERGENCE_PULLBACK' and div_valid:
+        setup='RSI_DIVERGENCE_PULLBACK'; evidence=['regular bullish RSI divergence','pivot confirmation (5-candle fractal)','price above EMA200']
+    elif reclaim: setup='EMA200_RECLAIM'; evidence=['2 prior closes below their own EMA200','closed candle reclaimed EMA200']
     elif div_valid: setup='RSI_DIVERGENCE_PULLBACK'; evidence=['regular bullish RSI divergence','pivot confirmation (5-candle fractal)','price above EMA200']
     elif breakout: setup='BULLISH_BREAKOUT'; evidence=['closed resistance break','volume >= 1.5x','supportive EMA structure']
     elif surge: setup='EARLY_MOMENTUM_SURGE'; evidence=['strong closed-candle momentum','volume >= 1.5x','EMA20 > EMA50','MACD histogram strengthening','not >3 ATR extended']
@@ -99,7 +115,11 @@ def score_symbol(symbol,candles,quote_volume=0,timeframe='1h',mtf=None):
     if extension: penalty+=35
     if mtf and mtf.get('strong_contradiction'): penalty+=25
     if quote_volume and quote_volume<5000000: penalty+=20
+    # No entry qualification gate: resistance is information and contributes to the score only.
+    room_block = False
+    entry_room_points = 15 if resistance_room_atr is None or resistance_room_atr >= MIN_RESISTANCE_ROOM_ATR else (8 if resistance_room_atr >= 0.5 else 2)
+    score_parts['entry_room'] = entry_room_points
     score=max(0,min(100,sum(score_parts.values())-penalty))
-    telegram_ok=setup in TRADE_SETUPS and valid and not extension and not (mtf and mtf.get('strong_contradiction')) and score>=ALERT_MIN_SCORE and (vr[i] or 0)>=1.2
-    qualified=setup in TRADE_SETUPS and valid and not extension
-    return {'symbol':symbol,'timeframe':timeframe,'direction':'LONG' if qualified else 'NONE','setup_type':setup,'qualified':qualified,'telegram_eligible':telegram_ok,'score':score,'price':_r(price),'quote_volume':quote_volume,'signal_time':closed[i]['open_time'],'reasons':evidence,'rejection_reasons':risk_reasons if not valid else ([] if qualified else ['setup is informational or lacks full confirmation']),'indicators':{'ema20':_r(e20),'ema50':_r(e50),'ema200':_r(e200),'rsi':_r(rv,2),'macd':_r(macd[i]),'macd_signal':_r(macd_sig[i]),'macd_histogram':_r(hist),'atr':_r(a),'volume_ratio':_r(vr[i],2),'vwap':_r(vwap[i]),'support_zone':support,'resistance_zone':resistance,'ema20_50_convergence':convergence,'ema_bullish_crossover':ema_cross,'extension':extension,'extension_atr':_r((price-e20)/a,2) if a else None,'divergence':div,'two_closes_below_ema200':below2,'ema200_reclaim':reclaim},'analysis':{'bias':'LONG' if qualified else 'WATCH','entry':{'low':_r(price),'high':_r(price)},'sl':_r(stop),'tp':[{'level':_r(tp2),'rr':2},{'level':_r(tp3),'rr':3}],'risk_pct':_r(R/price*100,2) if price else None,'invalidation':f'Long thesis invalid below {_r(stop)}.','counter_argument':'A setup can fail; score measures rule alignment, not probability.','historical':'Not a backtest result.','score_breakdown':score_parts,'penalties':{'extension':35 if extension else 0,'contradiction':25 if mtf and mtf.get('strong_contradiction') else 0,'illiquidity':20 if quote_volume and quote_volume<5000000 else 0},'total_score':score}}
+    telegram_ok=setup in TRADE_SETUPS and valid and not extension and not room_block and not (mtf and mtf.get('strong_contradiction')) and score>=ALERT_MIN_SCORE and (vr[i] or 0)>=1.2
+    qualified=setup in TRADE_SETUPS
+    return {'symbol':symbol,'timeframe':timeframe,'direction':'LONG' if qualified else 'NONE','setup_type':setup,'qualified':qualified,'telegram_eligible':telegram_ok,'score':score,'price':_r(price),'quote_volume':quote_volume,'signal_time':closed[i]['open_time'],'reasons':evidence,'rejection_reasons':risk_reasons if risk_reasons else [],'indicators':{'ema20':_r(e20),'ema50':_r(e50),'ema200':_r(e200),'rsi':_r(rv,2),'macd':_r(macd[i]),'macd_signal':_r(macd_sig[i]),'macd_histogram':_r(hist),'atr':_r(a),'volume_ratio':_r(vr[i],2),'vwap':_r(vwap[i]),'support_zone':support,'resistance_zone':resistance,'ema20_50_convergence':convergence,'ema_bullish_crossover':ema_cross,'extension':extension,'extension_atr':_r((price-e20)/a,2) if a else None,'resistance_room_atr':_r(resistance_room_atr,2),'resistance_too_close':room_block,'divergence':div,'two_closes_below_ema200':below2,'ema200_reclaim':reclaim},'analysis':{'bias':'LONG' if setup in TRADE_SETUPS else 'WATCH','entry':{'low':_r(price),'high':_r(price)},'sl':_r(stop),'tp':[{'level':_r(tp2),'rr':2},{'level':_r(tp3),'rr':3}],'risk_pct':_r(R/price*100,2) if price else None,'invalidation':f'Long thesis invalid below {_r(stop)}.','counter_argument':'A setup can fail; score measures rule alignment, not probability.','historical':'Not a backtest result.','score_breakdown':score_parts,'penalties':{'extension':35 if extension else 0,'contradiction':25 if mtf and mtf.get('strong_contradiction') else 0,'illiquidity':20 if quote_volume and quote_volume<5000000 else 0},'total_score':score}}
