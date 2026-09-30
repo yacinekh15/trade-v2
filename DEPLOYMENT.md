@@ -1,17 +1,10 @@
-# Deployment
+# Vercel deployment
 
-## Vercel
-Deploy the project root with `api/index.py` as the FastAPI entry point and the static dashboard in `public/index.html`.
+1. Upload/push this folder as the new version; keep the previous project/archive untouched.
+2. Vercel detects `api/index.py` as the Python function and the root `index.html` as the dashboard.
+3. Add environment variables in Vercel if Telegram or Upstash is required.
+4. Verify `/api/health` after deployment.
+5. Open the dashboard and run a single manual scan first.
+6. If desired, enable **Auto-scan every 60s**. This is browser-driven; there is no cron or GitHub Action.
 
-## Server-side environment variables
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `UPSTASH_REDIS_REST_URL`
-- `UPSTASH_REDIS_REST_TOKEN`
-- optional `SCAN_SECRET`
-- optional `MIN_QUOTE_VOLUME`, `MAX_RISK_PCT`, `MIN_STOP_ATR`, `EXTENSION_ATR`
-
-No secrets are placed in browser JavaScript.
-
-## Scanning
-The supplied specification requires **manual SCAN NOW only**. There is no GitHub Actions schedule, cron, or automatic scanner. The browser scans the user-provided `coins.txt` universe in bounded batches and shows progress.
+The browser scans coins in batches of 40. This keeps each serverless request bounded instead of asking one Vercel invocation to process the entire 242-coin universe.

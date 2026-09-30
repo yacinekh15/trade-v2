@@ -1,71 +1,116 @@
-"""Auditable technical-analysis calculations using only standard Python."""
-from datetime import datetime, timezone
+"""Auditable indicator calculations for closed Binance Spot candles."""
 
-def compute_ema_series(values, period):
-    if len(values)<period: return [None]*len(values)
-    out=[None]*(period-1); prev=sum(values[:period])/period; out.append(prev)
-    k=2/(period+1)
-    for v in values[period:]: prev=(v-prev)*k+prev; out.append(prev)
-    return out
-
-def compute_ema(values, period):
-    s=compute_ema_series(values,period); return s[-1] if s else None
 
 def compute_rsi_series(closes, period=14):
-    out=[None]*len(closes)
-    if len(closes)<period+1:return out
-    gains=[max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
-    losses=[max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
-    ag=sum(gains[:period])/period; al=sum(losses[:period])/period
-    def val(): return 100.0 if al==0 else 100-100/(1+ag/al)
-    out[period]=val()
-    for i in range(period,len(gains)):
-        ag=(ag*(period-1)+gains[i])/period; al=(al*(period-1)+losses[i])/period; out[i+1]=val()
+    out = [None] * len(closes)
+    if len(closes) <= period:
+        return out
+    gains = [0.0] * (len(closes) - 1)
+    losses = [0.0] * (len(closes) - 1)
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains[i - 1] = max(d, 0.0)
+        losses[i - 1] = max(-d, 0.0)
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    out[period] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        out[i + 1] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
     return out
 
-def compute_rsi(closes,period=14):
-    s=compute_rsi_series(closes,period); return s[-1] if s else None
 
-def compute_macd_series(closes,fast=12,slow=26,signal=9):
-    ef=compute_ema_series(closes,fast); es=compute_ema_series(closes,slow)
-    line=[(a-b if a is not None and b is not None else None) for a,b in zip(ef,es)]
-    valid=[x for x in line if x is not None]; sig_valid=compute_ema_series(valid,signal)
-    sig=[]; hist=[]; vi=0
-    for x in line:
-        if x is None: sig.append(None); hist.append(None)
-        else:
-            s=sig_valid[vi]; sig.append(s); hist.append(x-s if s is not None else None); vi+=1
-    return line,sig,hist
+def compute_rsi(closes, period=14):
+    s = compute_rsi_series(closes, period)
+    return s[-1] if s else None
 
-def compute_atr_series(candles,period=14):
-    out=[None]*len(candles)
-    if len(candles)<period+1:return out
-    trs=[]
-    for i in range(1,len(candles)):
-        c=candles[i]; p=candles[i-1]['close']; trs.append(max(c['high']-c['low'],abs(c['high']-p),abs(c['low']-p)))
-    atr=sum(trs[:period])/period; out[period]=atr
-    for i in range(period,len(trs)):
-        atr=(atr*(period-1)+trs[i])/period; out[i+1]=atr
+
+def compute_ema_series(values, period):
+    if len(values) < period:
+        return [None] * len(values)
+    out = [None] * (period - 1)
+    prev = sum(values[:period]) / period
+    out.append(prev)
+    alpha = 2 / (period + 1)
+    for value in values[period:]:
+        prev = (value - prev) * alpha + prev
+        out.append(prev)
     return out
 
-def compute_volume_ratio_series(volumes,lookback=20):
-    out=[None]*len(volumes)
-    for i in range(lookback,len(volumes)):
-        avg=sum(volumes[i-lookback:i])/lookback; out[i]=volumes[i]/avg if avg else None
+
+def compute_ema(values, period):
+    s = compute_ema_series(values, period)
+    return s[-1] if s else None
+
+
+def compute_macd_series(closes, fast=12, slow=26, signal=9):
+    ef = compute_ema_series(closes, fast)
+    es = compute_ema_series(closes, slow)
+    macd = [None if f is None or s is None else f - s for f, s in zip(ef, es)]
+    valid = [x for x in macd if x is not None]
+    sig_valid = compute_ema_series(valid, signal)
+    signal_full = [None] * len(macd)
+    j = 0
+    for i, x in enumerate(macd):
+        if x is not None:
+            signal_full[i] = sig_valid[j]
+            j += 1
+    hist = [None if a is None or b is None else a - b for a, b in zip(macd, signal_full)]
+    return macd, signal_full, hist
+
+
+def compute_macd(closes, fast=12, slow=26, signal=9):
+    m, s, h = compute_macd_series(closes, fast, slow, signal)
+    return m[-1], s[-1], h[-1]
+
+
+def compute_atr_series(candles, period=14):
+    out = [None] * len(candles)
+    if len(candles) <= period:
+        return out
+    trs = [None]
+    for i in range(1, len(candles)):
+        c, p = candles[i], candles[i - 1]
+        trs.append(max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"])))
+    atr = sum(trs[1:period + 1]) / period
+    out[period] = atr
+    for i in range(period + 1, len(candles)):
+        atr = (atr * (period - 1) + trs[i]) / period
+        out[i] = atr
     return out
 
-def compute_session_vwap(candles):
-    """UTC-session anchored VWAP, reset at each UTC date."""
-    out=[]; day=None; pv=0.0; vv=0.0
-    for c in candles:
-        d=datetime.fromtimestamp(c['open_time']/1000,tz=timezone.utc).date()
-        if d!=day: day=d; pv=0.0; vv=0.0
-        typical=(c['high']+c['low']+c['close'])/3; pv+=typical*c['volume']; vv+=c['volume']; out.append(pv/vv if vv else None)
-    return out
 
-def compute_zones(candles,lookback=20):
-    if len(candles)<lookback+1:return None,None
-    w=candles[-(lookback+1):-1]
-    support=min(x['low'] for x in w); resistance=max(x['high'] for x in w)
-    width=max((max(x['high'] for x in w)-min(x['low'] for x in w))*0.01,1e-12)
-    return {'low':support,'high':support+width},{'low':resistance-width,'high':resistance}
+def compute_atr(candles, period=14):
+    s = compute_atr_series(candles, period)
+    return s[-1] if s else None
+
+
+def compute_volume_ratio(volumes, lookback=20):
+    if len(volumes) < lookback + 1:
+        return None
+    avg = sum(volumes[-lookback - 1:-1]) / lookback
+    return None if avg == 0 else volumes[-1] / avg
+
+
+def compute_support_resistance(candles, lookback=20):
+    if len(candles) < lookback + 1:
+        return None, None
+    w = candles[-lookback - 1:-1]
+    return min(c["low"] for c in w), max(c["high"] for c in w)
+
+
+def ema_relationship(ema20, ema50, tolerance_pct=0.05):
+    if ema20 is None or ema50 in (None, 0):
+        return "UNKNOWN", None
+    gap = abs(ema20 - ema50) / abs(ema50) * 100
+    if gap <= tolerance_pct:
+        return "EQUAL", gap
+    return ("BULLISH" if ema20 > ema50 else "BEARISH"), gap
+
+
+def ema_crossed_up(series20, series50):
+    if len(series20) < 2 or len(series50) < 2:
+        return False
+    a0, b0, a1, b1 = series20[-2], series50[-2], series20[-1], series50[-1]
+    return None not in (a0, b0, a1, b1) and a0 <= b0 and a1 > b1

@@ -1,156 +1,127 @@
-"""FastAPI endpoints for Trade-HHJ long-only Binance Spot scanner."""
-import os,sys,time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,ROOT)
+"""Trade-HHJ Vercel API for the fresh multi-strategy Binance Spot scanner."""
+import os,sys,time,traceback
+ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__)));sys.path.insert(0,ROOT)
 from fastapi import FastAPI,Header,HTTPException,Query
-from pydantic import BaseModel,Field
-app=FastAPI(title='Trade-HHJ Manual Spot Scanner')
+from config import *
+from scanner import run_scan,STRATEGIES
+from telegram_alerts import alert_signals
+from upstash_client import get_json,set_json,configured as upstash_configured
+from binance_data import get_klines
 
-def deps():
-    from config import load_coins,TIMEFRAMES,DEFAULT_TIMEFRAME,CANDLE_LOOKBACK,SCAN_SECRET,BACKTEST_DEFAULT_LIMIT,BACKTEST_MAX_LIMIT,DEFAULT_MIN_QUOTE_VOLUME,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
-    from scanner import run_scan,combine_mtf
-    from telegram_alerts import check_and_alert,check_and_alert_mtf,check_instant_reclaim_alerts
-    from upstash_client import get_json,set_json,configured as upstash_configured
-    from binance_data import get_klines
-    from backtest import backtest_candles
-    return locals()
+app=FastAPI(title="Trade-HHJ Scanner API")
 
-def auth(d,secret,header):
-    if d['SCAN_SECRET'] and (header or secret)!=d['SCAN_SECRET']: raise HTTPException(401,'Invalid scan secret')
+from pydantic import BaseModel
 
-def persist(d,tf,payload):
-    d['set_json'](f'results:{tf}',payload)
-    d['set_json'](f'scan_status:{tf}',{k:payload[k] for k in ('status','timeframe','updated_at','duration_seconds','coin_count','successful_count','failed_count','skipped_count')})
+class BatchRequest(BaseModel):
+    symbols: list[str]
+    timeframe: str = DEFAULT_TIMEFRAME
+    strategy: str = "EMA200_CROSS"
+    telegram: bool = False
 
-def do_scan(tf,symbols,telegram_enabled=False,instant_reclaim=False):
-    d=deps(); started=time.time(); results,failed,skipped=d['run_scan'](symbols,tf,d['CANDLE_LOOKBACK'],d['DEFAULT_MIN_QUOTE_VOLUME'])
-    # Two-stage confirmation for Telegram: only candidates get higher-timeframe context.
-    if telegram_enabled and results:
-        higher={'1h':['4h'],'15m':['1h','4h'],'5m':['15m','1h','4h']}.get(tf,[])
-        for r in results:
-            if not r.get('telegram_eligible'): continue
-            states={tf:'bullish' if r.get('qualified') else 'neutral'}; bear=0; bull=1 if r.get('qualified') else 0
-            # Stage-2 MTF confirmation is parallelized because 15m candidates
-            # can require both 1h and 4h candles. A slow sequential path can
-            # exceed Vercel's function timeout. Failures remain neutral rather
-            # than turning the whole scan into a 500/timeout.
-            from setup_score import score_symbol
-            def _check_htf(htf):
-                hc=d['get_klines'](r['symbol'],htf,d['CANDLE_LOOKBACK'])
-                return htf, score_symbol(r['symbol'],hc,0,htf)
-            with ThreadPoolExecutor(max_workers=min(2,len(higher))) as pool:
-                futures=[pool.submit(_check_htf,htf) for htf in higher]
-                for f in as_completed(futures):
-                    try:
-                        htf,hr=f.result()
-                        states[htf]='bullish' if hr and hr.get('qualified') else ('bearish' if hr and hr.get('setup_type')=='FAKEOUT' else 'neutral')
-                    except Exception:
-                        # Recover the timeframe name even when the request fails.
-                        htf = higher[futures.index(f)]
-                        states[htf]='neutral'
-            bull=sum(v=='bullish' for v in states.values())
-            bear=sum(v=='bearish' for v in states.values())
-            r['mtf_states']=states
-            if bear>=2 or (tf=='1h' and states.get('4h')=='bearish'):
-                r['telegram_eligible']=False; r['analysis']['penalties']['contradiction']=25; r['score']=max(0,r['score']-25)
-    # Alerting must never turn a successful market scan into HTTP 500.
-    try:
-        alerts=d['check_and_alert'](results,tf,enabled=telegram_enabled)
-    except Exception as e:
-        alerts={'sent':0,'skipped':0,'candidates':0,'enabled':telegram_enabled,'error':str(e)}
-        for r in results:
-            r.setdefault('analysis',{}).setdefault('warnings',[]).append(f'Telegram error: {e}')
-    instant_alerts={'sent':0,'skipped':0,'candidates':0,'enabled':False,'configured':False}
-    if instant_reclaim and tf != 'ALL':
-        try:
-            instant_alerts=d['check_instant_reclaim_alerts'](results,tf,enabled=True)
-        except Exception as e:
-            instant_alerts={'sent':0,'skipped':0,'candidates':0,'enabled':True,'configured':False,'error':str(e)}
-    payload={'status':'ok' if not failed else 'partial','timeframe':tf,'updated_at':time.time(),'duration_seconds':round(time.time()-started,2),'coin_count':len(symbols),'successful_count':len(results),'failed_count':len(failed),'skipped_count':len(skipped),'failed': [{'symbol':s,'reason':e} for s,e in failed], 'skipped':[{'symbol':s,'reason':e} for s,e in skipped], 'results':results,'alerts':alerts,'instant_reclaim_alerts':instant_alerts}
-    # Persistence is best-effort: scanner results remain usable without Redis.
-    try:
-        persist(d,tf,payload)
-    except Exception as e:
-        payload['persistence_warning']=str(e)
-    return payload
+class TelegramSetting(BaseModel):
+    enabled: bool
 
-@app.get('/api/health')
+
+MEM_RESULTS={}
+
+def _auth(secret,header):
+    if SCAN_SECRET and (header or secret)!=SCAN_SECRET: raise HTTPException(401,"Invalid scan secret")
+
+def _save(key,payload):
+    MEM_RESULTS[key]=payload
+    try:set_json(key,payload)
+    except Exception:pass
+
+def _load(key,default):
+    if key in MEM_RESULTS:return MEM_RESULTS[key]
+    try:return get_json(key,default)
+    except Exception:return default
+
+def do_scan(tf,strategy,telegram_enabled=False):
+    started=time.time(); coins=load_coins()
+    payload=run_scan(coins,tf,strategy,CANDLE_LOOKBACK,LIQUIDITY_MIN_USDT)
+    alerts=alert_signals(payload["signals"],tf,telegram_enabled)
+    results=payload["results"]
+    out={"status":"ok","timeframe":tf,"strategy":strategy,"updated_at":time.time(),"duration_seconds":round(time.time()-started,2),
+         "coin_count":len(coins),"scanned_count":payload["scanned_count"],"analyzed_count":payload["analyzed_count"],
+         "failed_count":len(payload["failed"]),"failed":payload["failed"],"skipped_count":len(payload["skipped"]),
+         "skipped":payload["skipped"],"results":results,"signals":payload["signals"],"alerts":alerts,
+         "liquidity_error":payload["liquidity_error"]}
+    _save(f"results:{strategy}:{tf}",out);return out
+
+@app.get("/api/health")
 async def health():
-    d=deps(); return {'status':'ok','upstash_configured':d['upstash_configured'](),'telegram_configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID']),'timeframes':d['TIMEFRAMES'],'coins_file':len(d['load_coins']()),'auto_scan_supported':True,'auto_scan_interval_seconds':60}
+    return {"status":"ok","python":sys.version.split()[0],"upstash_configured":upstash_configured(),"telegram_configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),"timeframes":TIMEFRAMES,"coin_count":len(load_coins()),"strategies":list(STRATEGIES)}
 
-@app.get('/api/universe')
-async def universe():
-    d=deps(); return {'symbols':d['load_coins'](),'count':len(d['load_coins']())}
+@app.get("/api/config")
+async def config_endpoint():
+    return {"timeframes":TIMEFRAMES,"strategies":["EMA200_CROSS","RSI_DIVERGENCE","VWAP_RSI_15M_EMA200","BB_PULLBACK","KIJUN_SSL"],"all_strategies":list(STRATEGIES),"default_timeframe":DEFAULT_TIMEFRAME,"auto_scan_seconds":AUTO_SCAN_SECONDS,"liquidity_min_usdt":LIQUIDITY_MIN_USDT,"telegram_configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),"coin_count":len(load_coins())}
 
-@app.get('/api/results')
-async def results(timeframe:str='1h'):
-    d=deps()
-    if timeframe=='all': return d['get_json']('results:all',{'status':'no_results','results':[]})
-    if timeframe not in d['TIMEFRAMES']: raise HTTPException(400,'invalid timeframe')
-    return d['get_json'](f'results:{timeframe}',{'status':'no_results','timeframe':timeframe,'results':[]})
+@app.get("/api/results")
+async def results(timeframe:str=DEFAULT_TIMEFRAME,strategy:str="EMA200_CROSS"):
+    if timeframe not in TIMEFRAMES:raise HTTPException(400,"invalid timeframe")
+    if strategy not in STRATEGIES and strategy != "ALL":raise HTTPException(400,"invalid strategy")
+    return _load(f"results:{strategy}:{timeframe}",{"status":"no_results","timeframe":timeframe,"strategy":strategy,"results":[],"signals":[]})
 
-@app.post('/api/scan')
-async def scan(timeframe:str=Query('1h'),symbols:str=Query(''),telegram:int=Query(0,ge=0,le=1),instant_reclaim:int=Query(0,ge=0,le=1),secret:str=Query(''),x_scan_secret:str=Header('',alias='X-Scan-Secret')):
-    d=deps(); auth(d,secret,x_scan_secret)
-    if timeframe not in d['TIMEFRAMES']: raise HTTPException(400,'invalid timeframe')
-    universe=d['load_coins'](); chosen=[s.strip().upper() for s in symbols.split(',') if s.strip()] if symbols else universe
-    chosen=[s for s in chosen if s in universe]
-    if not chosen: raise HTTPException(400,'No valid symbols selected')
-    try:
-        p=do_scan(timeframe,chosen,bool(telegram),bool(instant_reclaim) and timeframe != 'ALL')
-        return {'ok':True,**p}
-    except Exception as e:
-        # Return a useful API error instead of an opaque Vercel 500.
-        raise HTTPException(502,f'Scan engine error: {type(e).__name__}: {e}')
+@app.get("/api/status")
+async def status(timeframe:str=DEFAULT_TIMEFRAME,strategy:str="EMA200_CROSS"):
+    r=_load(f"results:{strategy}:{timeframe}",{})
+    return {"status":"ok","server_time":time.time(),"timeframe":timeframe,"strategy":strategy,"scan":r,"telegram_configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),"upstash_configured":upstash_configured()}
 
-@app.post('/api/scan-all')
-async def scan_all(timeframes:str=Query('1h,4h'),symbols:str=Query(''),telegram:int=Query(0,ge=0,le=1),secret:str=Query(''),x_scan_secret:str=Header('',alias='X-Scan-Secret')):
-    d=deps(); auth(d,secret,x_scan_secret); universe=d['load_coins']; chosen=[s.strip().upper() for s in symbols.split(',') if s.strip()] if symbols else universe(); tfs=[x.strip() for x in timeframes.split(',') if x.strip()]
-    if any(x not in d['TIMEFRAMES'] for x in tfs): raise HTTPException(400,'invalid timeframe')
-    payloads={tf:do_scan(tf,[s for s in chosen if s in universe()],False) for tf in tfs}; combined=d['combine_mtf'](payloads); alerts=d['check_and_alert_mtf'](combined,bool(telegram))
-    out={'status':'ok','updated_at':time.time(),'timeframes':tfs,'results':combined,'alerts':alerts}; d['set_json']('results:all',out); return out
+@app.post("/api/scan_batch")
+async def scan_batch(req: BatchRequest, secret: str = Query(""), x_scan_secret: str = Header("", alias="X-Scan-Secret")):
+    _auth(secret, x_scan_secret)
+    if req.timeframe not in TIMEFRAMES: raise HTTPException(400, "invalid timeframe")
+    if req.strategy not in STRATEGIES and req.strategy != "ALL": raise HTTPException(400, "invalid strategy")
+    if not req.symbols or len(req.symbols) > 50: raise HTTPException(400, "symbols must contain 1-50 coins")
+    if req.strategy == "ALL":
+        a=run_scan(req.symbols, req.timeframe, "ALL", CANDLE_LOOKBACK, LIQUIDITY_MIN_USDT)
+        results=a["results"]; signals=a["signals"]
+    else:
+        a=run_scan(req.symbols, req.timeframe, req.strategy, CANDLE_LOOKBACK, LIQUIDITY_MIN_USDT)
+        results=a["results"];signals=a["signals"]
+    alerts=alert_signals(signals,req.timeframe,req.telegram)
+    return {"ok":True,"results":results,"signals":signals,"failed":a["failed"],"skipped":a["skipped"],"liquidity_error":a["liquidity_error"],"alerts":alerts}
 
-@app.get('/api/candles')
-async def candles(symbol:str,timeframe:str='1h',limit:int=260):
-    d=deps(); symbol=symbol.upper().strip()
-    if timeframe not in d['TIMEFRAMES']: raise HTTPException(400,'invalid timeframe')
-    try:return {'symbol':symbol,'timeframe':timeframe,'candles':d['get_klines'](symbol,timeframe,max(250,min(limit,1000)))}
-    except Exception as e: raise HTTPException(502,f'Market data error: {e}')
+@app.get("/api/settings/telegram")
+async def get_telegram_setting():
+    default=TELEGRAM_ENABLED_DEFAULT
+    return {"enabled":bool(_load("settings:telegram",{"enabled":default}).get("enabled",default)),"configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)}
 
-@app.post('/api/backtest')
-async def backtest(symbol:str,timeframe:str='1h',limit:int=None,max_hold:int=200):
-    d=deps(); symbol=symbol.upper().strip()
-    if timeframe not in d['TIMEFRAMES']: raise HTTPException(400,'invalid timeframe')
-    limit=max(250,min(limit or d['BACKTEST_DEFAULT_LIMIT'],d['BACKTEST_MAX_LIMIT']))
-    try:return d['backtest_candles'](symbol,d['get_klines'](symbol,timeframe,limit),timeframe,max_hold)
-    except Exception as e: raise HTTPException(502,f'Backtest data error: {e}')
+@app.post("/api/settings/telegram")
+async def set_telegram_setting(setting: TelegramSetting):
+    _save("settings:telegram",{"enabled":setting.enabled})
+    return {"ok":True,"enabled":setting.enabled,"configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)}
+
+@app.post("/api/scan")
+async def scan(timeframe:str=Query(DEFAULT_TIMEFRAME),strategy:str=Query("EMA200_CROSS"),telegram:int=Query(0,ge=0,le=1),secret:str=Query(""),x_scan_secret:str=Header("",alias="X-Scan-Secret")):
+    _auth(secret,x_scan_secret)
+    if timeframe not in TIMEFRAMES:raise HTTPException(400,"invalid timeframe")
+    p=do_scan(timeframe,strategy,bool(telegram));return {"ok":True,**p}
+
+@app.get("/api/candles")
+async def candles(symbol:str,timeframe:str="1h",limit:int=280):
+    if timeframe not in TIMEFRAMES:raise HTTPException(400,"invalid timeframe")
+    try:return {"symbol":symbol.upper().strip(),"timeframe":timeframe,"candles":get_klines(symbol.upper().strip(),timeframe,max(220,min(limit,1000)))}
+    except Exception as e:raise HTTPException(502,f"Market data error: {e}")
+
+@app.get("/api/coins")
+async def coins(): return {"name":"user-provided coin universe","count":len(load_coins()),"coins":load_coins()}
 
 class PaperTrade(BaseModel):
-    symbol:str; timeframe:str='1h'; setup:str; direction:str='LONG'; entry:float; invalidation:float; tp1:float|None=None; tp2:float|None=None; score:int=0; note:str=''
+    symbol: str
+    timeframe: str = "1h"
+    entry: float
+    score: int = 0
+    note: str = ""
 
-@app.get('/api/paper-trades')
+@app.get("/api/paper-trades")
 async def paper_trades():
-    d=deps(); return {'trades':d['get_json']('paper_trades',[]) or []}
+    return {"trades": _load("paper_trades", []) or []}
 
-@app.post('/api/paper-trades')
-async def add_paper_trade(trade:PaperTrade):
-    if trade.direction!='LONG': raise HTTPException(400,'Paper trading is long-only')
-    d=deps(); rows=d['get_json']('paper_trades',[]) or []; row={'id':int(time.time()*1000),**trade.model_dump(),'status':'OPEN','created_at':time.time()}; rows.insert(0,row); d['set_json']('paper_trades',rows[:500]); return {'ok':True,'trade':row}
-
-@app.get('/api/telegram')
-async def telegram_status():
-    d=deps(); state=d['get_json']('telegram_enabled',True); return {'enabled':bool(state),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
-
-@app.post('/api/telegram')
-async def telegram_toggle(enabled:bool=Query(...)):
-    d=deps(); d['set_json']('telegram_enabled',bool(enabled)); return {'ok':True,'enabled':bool(enabled),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
-
-@app.get('/api/telegram/instant-reclaim')
-async def instant_reclaim_status():
-    d=deps(); state=d['get_json']('telegram_instant_reclaim_enabled',False)
-    return {'enabled':bool(state),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
-
-@app.post('/api/telegram/instant-reclaim')
-async def instant_reclaim_toggle(enabled:bool=Query(...)):
-    d=deps(); d['set_json']('telegram_instant_reclaim_enabled',bool(enabled))
-    return {'ok':True,'enabled':bool(enabled),'configured':bool(d['TELEGRAM_BOT_TOKEN'] and d['TELEGRAM_CHAT_ID'])}
+@app.post("/api/paper-trades")
+async def add_paper_trade(trade: PaperTrade):
+    rows=_load("paper_trades",[]) or []
+    row={"id":int(time.time()*1000),**trade.model_dump(),"created_at":time.time(),"status":"OPEN"}
+    rows.insert(0,row);_save("paper_trades",rows[:200])
+    return {"ok":True,"trade":row}
