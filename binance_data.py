@@ -11,7 +11,7 @@ def _get(path, params=None, retries=3):
     last = None
     for attempt in range(retries):
         try:
-            r = requests.get(f"{BINANCE_BASE_URL}{path}", params=params, headers=HEADERS, timeout=10)
+            r = requests.get(f"{BINANCE_BASE_URL}{path}", params=params, headers=HEADERS, timeout=8)
             if r.status_code in (418, 429):
                 time.sleep(0.7 * (attempt + 1))
                 last = RuntimeError(f"Binance rate limit HTTP {r.status_code}")
@@ -64,7 +64,7 @@ def get_klines(symbol, interval="1h", limit=280):
     return out
 
 
-def get_klines_batch(symbols, interval="1h", limit=280, max_workers=16):
+def get_klines_batch(symbols, interval="1h", limit=280, max_workers=8):
     results, failed = {}, []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(get_klines, s, interval, limit): s for s in symbols}

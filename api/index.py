@@ -74,12 +74,10 @@ async def scan_batch(req: BatchRequest, secret: str = Query(""), x_scan_secret: 
     if req.timeframe not in TIMEFRAMES: raise HTTPException(400, "invalid timeframe")
     if req.strategy not in STRATEGIES and req.strategy != "ALL": raise HTTPException(400, "invalid strategy")
     if not req.symbols or len(req.symbols) > 50: raise HTTPException(400, "symbols must contain 1-50 coins")
-    if req.strategy == "ALL":
-        a=run_scan(req.symbols, req.timeframe, "ALL", CANDLE_LOOKBACK, LIQUIDITY_MIN_USDT)
-        results=a["results"]; signals=a["signals"]
-    else:
-        a=run_scan(req.symbols, req.timeframe, req.strategy, CANDLE_LOOKBACK, LIQUIDITY_MIN_USDT)
-        results=a["results"];signals=a["signals"]
+    # ALL is a single request: one liquidity pass, one primary timeframe candle
+    # fetch, and (for 5m) one 15m fetch shared by the VWAP strategy.
+    a=run_scan(req.symbols, req.timeframe, req.strategy, CANDLE_LOOKBACK, LIQUIDITY_MIN_USDT)
+    results=a["results"]; signals=a["signals"]
     alerts=alert_signals(signals,req.timeframe,req.telegram)
     return {"ok":True,"results":results,"signals":signals,"failed":a["failed"],"skipped":a["skipped"],"liquidity_error":a["liquidity_error"],"alerts":alerts}
 
