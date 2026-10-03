@@ -53,3 +53,16 @@ Deploy the project as a fresh version of this folder. After deployment, open the
 - 5m VWAP + RSI Divergence + 15m EMA200
 - Bollinger Pullback + EMA200
 - Kijun-sen + SSL Channel
+
+
+## Private Two-Green Strategy
+
+Added `TWO_GREEN` as a separate strategy module. It scans the user-provided coin universe using closed Binance Spot candles.
+
+- Indicator 1: Trend Speed Analyzer (Zeiierman)
+- Indicator 2: Adaptive Trend Expansion Bands (BigBeluga)
+- Signal: both indicators green on the latest closed candle.
+- Non-signal states are retained and shown as `TREND SPEED ONLY`, `EXPANSION BANDS ONLY`, or `NEITHER GREEN`.
+- No Pump/Dump logic is used by this strategy.
+- Auto scan remains browser/client driven at 60 seconds.
+- Telegram is optional.

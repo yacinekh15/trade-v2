@@ -8,6 +8,7 @@ GENERIC_STRATEGIES = [
     "RSI_DIVERGENCE",
     "BB_PULLBACK",
     "KIJUN_SSL",
+    "TWO_GREEN",
 ]
 
 

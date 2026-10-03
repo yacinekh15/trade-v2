@@ -1,3 +1,4 @@
-Trade-HHJ Fresh 5-Strategy Build
-Strategies: EMA200 Cross; RSI Divergence + EMA200; 5m VWAP + RSI Divergence + 15m EMA200; Bollinger Pullback + EMA200; Kijun-sen + SSL Channel
-Updated: 2026-09-30
+Trade-HHJ Private Two-Green Strategy Build
+Strategy: Trend Speed Analyzer + Adaptive Trend Expansion Bands
+Rule: alert only when both indicators are green; show all other coin states
+Updated: 2026-10-03

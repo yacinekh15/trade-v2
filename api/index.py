@@ -55,7 +55,7 @@ async def health():
 
 @app.get("/api/config")
 async def config_endpoint():
-    return {"timeframes":TIMEFRAMES,"strategies":["EMA200_CROSS","RSI_DIVERGENCE","VWAP_RSI_15M_EMA200","BB_PULLBACK","KIJUN_SSL"],"all_strategies":list(STRATEGIES),"default_timeframe":DEFAULT_TIMEFRAME,"auto_scan_seconds":AUTO_SCAN_SECONDS,"liquidity_min_usdt":LIQUIDITY_MIN_USDT,"telegram_configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),"coin_count":len(load_coins())}
+    return {"timeframes":TIMEFRAMES,"strategies":list(STRATEGIES),"all_strategies":list(STRATEGIES),"default_timeframe":DEFAULT_TIMEFRAME,"auto_scan_seconds":AUTO_SCAN_SECONDS,"liquidity_min_usdt":LIQUIDITY_MIN_USDT,"telegram_configured":bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),"coin_count":len(load_coins())}
 
 @app.get("/api/results")
 async def results(timeframe:str=DEFAULT_TIMEFRAME,strategy:str="EMA200_CROSS"):

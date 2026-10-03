@@ -12,7 +12,7 @@ The scanner never places trades. Signals use closed candles only.
 from indicators_engine import (
     compute_ema_series, compute_rsi_series, compute_macd_series,
     compute_atr_series, compute_volume_ratio, compute_support_resistance,
-    ema_relationship,
+    ema_relationship, compute_trend_speed_analyzer, compute_adaptive_expansion,
 )
 from config import (
     DIVERGENCE_MAX_SPACING, DIVERGENCE_MIN_RSI_DELTA, DIVERGENCE_MIN_SPACING,
@@ -25,6 +25,7 @@ STRATEGIES = {
     "VWAP_RSI_15M_EMA200": "5m VWAP + RSI Divergence + 15m EMA200",
     "BB_PULLBACK": "Bollinger Pullback + EMA200",
     "KIJUN_SSL": "Kijun-sen + SSL Channel",
+    "TWO_GREEN": "Two Indicators — Both Green",
 }
 
 
@@ -275,6 +276,55 @@ def kijun_ssl(symbol,timeframe,candles):
     return _base(symbol,timeframe,"KIJUN_SSL",ctx,conditions,signal,extra={"kijun":_r(kij),"ssl_green":_r(up[i]),"ssl_red":_r(dn[i]),"ssl_cross":cross,"entry_reference":_r(entry),"stop":_r(stop),"tp2":_r(entry+2*risk) if risk else None,"trailing_rule":"After +2R, trail with red SSL line; exit on close below red SSL"})
 
 
+def two_green(symbol, timeframe, candles):
+    if len(candles) < 220:
+        return None
+    ts = compute_trend_speed_analyzer(candles, max_length=50, accel_multiplier=5.0)
+    ae = compute_adaptive_expansion(candles, ma_type="EMA", ma_length=20, atr_length=14, mult1=1.0)
+    if not ts or not ae:
+        return None
+    both = bool(ts["green"] and ae["green"])
+    ts_green = bool(ts["green"])
+    ae_green = bool(ae["green"])
+    if both:
+        status = "BOTH GREEN"
+        status_text = "Both indicators are green"
+    elif ts_green:
+        status = "TREND SPEED ONLY"
+        status_text = "Trend Speed Analyzer is green; Expansion Bands is not green"
+    elif ae_green:
+        status = "EXPANSION BANDS ONLY"
+        status_text = "Expansion Bands is green; Trend Speed Analyzer is not green"
+    else:
+        status = "NEITHER GREEN"
+        status_text = "Neither indicator is green"
+    ctx = {
+        "price": _r(candles[-1]["close"]),
+        "signal_time": candles[-1].get("close_time", candles[-1].get("open_time")),
+        "context_score": 0,
+        "indicators": {
+            "trend_speed_dynamic_ema": _r(ts["dynamic_ema"]),
+            "trend_speed_wma2": _r(ts["wma2"]),
+            "trend_speed": _r(ts["trend_speed"]),
+            "trend_speed_green": ts_green,
+            "expansion_base_ma": _r(ae["base_ma"]),
+            "expansion_atr14": _r(ae["atr"]),
+            "expansion_upper_zone3": _r(ae["upper_zone3"]),
+            "expansion_lower_zone3": _r(ae["lower_zone3"]),
+            "expansion_green": ae_green,
+        },
+    }
+    conditions = [
+        _cond("trend_speed_green", ts_green, "Trend Speed Analyzer is green" if ts_green else "Trend Speed Analyzer is not green"),
+        _cond("expansion_bands_green", ae_green, "Adaptive Trend Expansion Bands is green" if ae_green else "Adaptive Trend Expansion Bands is not green"),
+    ]
+    return _base(symbol, timeframe, "TWO_GREEN", ctx, conditions, signal=both, status=status, extra={
+        "strategy_status": status, "status_text": status_text,
+        "indicator_1": {"name": "Trend Speed Analyzer", "green": ts_green},
+        "indicator_2": {"name": "Adaptive Trend Expansion Bands", "green": ae_green},
+    })
+
+
 def scan_symbol(symbol,timeframe,candles,strategy="ALL",trend_candles=None):
     funcs={
         "EMA200_CROSS":ema200_cross,
@@ -282,6 +332,7 @@ def scan_symbol(symbol,timeframe,candles,strategy="ALL",trend_candles=None):
         "VWAP_RSI_15M_EMA200":vwap_rsi_15m_ema200,
         "BB_PULLBACK":bb_pullback,
         "KIJUN_SSL":kijun_ssl,
+        "TWO_GREEN":two_green,
     }
     keys=list(funcs) if strategy=="ALL" else [strategy]
     out=[]
