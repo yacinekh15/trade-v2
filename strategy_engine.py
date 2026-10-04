@@ -332,6 +332,9 @@ def two_green(symbol, timeframe, candles):
         "strategy_status": status, "status_text": status_text,
         "two_green_since": transition_time,
         "fresh_two_green": fresh_transition,
+        "alert": fresh_transition,
+        "alert_type": "NEW_TWO_GREEN" if fresh_transition else None,
+        "alert_text": "NEW BOTH GREEN — both indicators just became green" if fresh_transition else None,
         "indicator_1": {"name": "Trend Speed Analyzer", "green": ts_green},
         "indicator_2": {"name": "Adaptive Trend Expansion Bands", "green": ae_green},
     })
