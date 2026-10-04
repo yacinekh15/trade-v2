@@ -13,6 +13,7 @@ from indicators_engine import (
     compute_ema_series, compute_rsi_series, compute_macd_series,
     compute_atr_series, compute_volume_ratio, compute_support_resistance,
     ema_relationship, compute_trend_speed_analyzer, compute_adaptive_expansion,
+    compute_two_green_transition,
 )
 from config import (
     DIVERGENCE_MAX_SPACING, DIVERGENCE_MIN_RSI_DELTA, DIVERGENCE_MIN_SPACING,
@@ -281,11 +282,19 @@ def two_green(symbol, timeframe, candles):
         return None
     ts = compute_trend_speed_analyzer(candles, max_length=50, accel_multiplier=5.0)
     ae = compute_adaptive_expansion(candles, ma_type="EMA", ma_length=20, atr_length=14, mult1=1.0)
-    if not ts or not ae:
+    transition = compute_two_green_transition(candles)
+    if not ts or not ae or not transition:
         return None
-    both = bool(ts["green"] and ae["green"])
     ts_green = bool(ts["green"])
-    ae_green = bool(ae["green"])
+    ae_green = bool(ae["trend"] == 1)
+    both = bool(ts_green and ae_green)
+    states = transition["states"]
+    latest_transition_index = transition["latest_transition_index"]
+    transition_time = None
+    if latest_transition_index is not None:
+        c = candles[latest_transition_index]
+        transition_time = c.get("close_time", c.get("open_time"))
+    fresh_transition = bool(states and states[-1]["transition"])
     if both:
         status = "BOTH GREEN"
         status_text = "Both indicators are green"
@@ -301,6 +310,7 @@ def two_green(symbol, timeframe, candles):
     ctx = {
         "price": _r(candles[-1]["close"]),
         "signal_time": candles[-1].get("close_time", candles[-1].get("open_time")),
+        "two_green_since": transition_time,
         "context_score": 0,
         "indicators": {
             "trend_speed_dynamic_ema": _r(ts["dynamic_ema"]),
@@ -318,12 +328,13 @@ def two_green(symbol, timeframe, candles):
         _cond("trend_speed_green", ts_green, "Trend Speed Analyzer is green" if ts_green else "Trend Speed Analyzer is not green"),
         _cond("expansion_bands_green", ae_green, "Adaptive Trend Expansion Bands is green" if ae_green else "Adaptive Trend Expansion Bands is not green"),
     ]
-    return _base(symbol, timeframe, "TWO_GREEN", ctx, conditions, signal=both, status=status, extra={
+    return _base(symbol, timeframe, "TWO_GREEN", ctx, conditions, signal=fresh_transition, status=status, extra={
         "strategy_status": status, "status_text": status_text,
+        "two_green_since": transition_time,
+        "fresh_two_green": fresh_transition,
         "indicator_1": {"name": "Trend Speed Analyzer", "green": ts_green},
         "indicator_2": {"name": "Adaptive Trend Expansion Bands", "green": ae_green},
     })
-
 
 def scan_symbol(symbol,timeframe,candles,strategy="ALL",trend_candles=None):
     funcs={

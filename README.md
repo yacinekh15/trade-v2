@@ -67,5 +67,9 @@ Added `TWO_GREEN` as a separate strategy module. It scans the user-provided coin
 - Auto scan remains browser/client driven at 60 seconds.
 - Telegram is optional.
 
-## Two-Green ordering
-For the TWO_GREEN strategy, results are ordered with BOTH GREEN first, then partial states, and newest signal/status time first within each state. Daily (1d) scanning is supported.
+## Two-Green ordering and fresh transition
+For `TWO_GREEN`, the scanner records the latest closed candle on which a coin **changed into BOTH GREEN** (previous closed candle was not BOTH GREEN; current closed candle is BOTH GREEN). Results are ordered by that transition time: newest transition first, oldest transition last. Coins that have never reached BOTH GREEN in the loaded history are placed after transitioned coins.
+
+A coin that remains BOTH GREEN does not get a new timestamp on every scan; it keeps the original transition candle. A website/Telegram signal is emitted only for a newly detected transition on the latest closed candle.
+
+Daily (`1d`) scanning is supported.

@@ -272,3 +272,102 @@ def compute_adaptive_expansion(candles, ma_type="EMA", ma_length=20, atr_length=
         "flipped_bullish": flipped_bull,
         "flipped_bearish": flipped_bear,
     }
+
+
+def compute_two_green_transition(candles, max_length=50, accel_multiplier=5.0, ma_length=20, atr_length=14, mult1=1.0):
+    """Return the latest TWO_GREEN transition candle and full state series.
+
+    A transition is defined strictly as: previous closed candle was not BOTH GREEN
+    and the current closed candle is BOTH GREEN. This is used for ordering and
+    fresh-signal detection; it does not change the underlying indicator formulas.
+    """
+    n = len(candles)
+    if n == 0:
+        return {"states": [], "latest_transition_index": None}
+
+    closes = [float(c["close"]) for c in candles]
+    opens = [float(c["open"]) for c in candles]
+
+    # Trend Speed Analyzer state series (same calculation as compute_trend_speed_analyzer).
+    dyn = [None] * n
+    deltas = [0.0] * n
+    for i in range(n):
+        start = max(0, i - 199)
+        max_abs = max(abs(x) for x in closes[start:i + 1]) or 1.0
+        norm = (closes[i] + max_abs) / (2.0 * max_abs)
+        dyn_length = 5.0 + norm * (max_length - 5.0)
+        delta = 0.0 if i == 0 else abs(closes[i] - closes[i - 1])
+        deltas[i] = delta
+        dstart = max(0, i - 199)
+        max_delta = max(deltas[dstart:i + 1]) or 1.0
+        alpha_base = 2.0 / (dyn_length + 1.0)
+        alpha = min(1.0, alpha_base * (1.0 + (delta / max_delta) * accel_multiplier))
+        dyn[i] = closes[i] if i == 0 else alpha * closes[i] + (1.0 - alpha) * dyn[i - 1]
+
+    rma_close = compute_rma_series(closes, 10)
+    rma_open = compute_rma_series(opens, 10)
+    running = 0.0
+    pos = 0
+    trend_speed = [None] * n
+    trend_green = [False] * n
+    speed_green = [False] * n
+    for i in range(n):
+        wma2 = closes[i] if i == 0 else (2.0 * closes[i] + closes[i - 1]) / 3.0
+        trend_green[i] = wma2 > dyn[i]
+        if rma_close[i] is None or rma_open[i] is None:
+            continue
+        if i > 0:
+            bullish_cross = closes[i] > dyn[i] and closes[i - 1] <= dyn[i - 1]
+            bearish_cross = closes[i] < dyn[i] and closes[i - 1] >= dyn[i - 1]
+            if bullish_cross:
+                pos = 1
+                running = rma_close[i] - rma_open[i]
+            elif bearish_cross:
+                pos = -1
+                running = rma_close[i] - rma_open[i]
+            else:
+                running += rma_close[i] - rma_open[i]
+        else:
+            running = rma_close[i] - rma_open[i]
+        trend_speed[i] = running
+        speed_green[i] = running > 0
+
+    # Adaptive Expansion Bands bullish trend state (same Zone-3 logic as current indicator).
+    base = compute_ema_series(closes, ma_length)
+    atr = compute_atr_series(candles, atr_length)
+    u3 = [None] * n; l3 = [None] * n
+    for i in range(n):
+        if base[i] is not None and atr[i] is not None:
+            mult3 = mult1 + 1.0
+            u3[i] = base[i] + atr[i] * mult3
+            l3[i] = base[i] - atr[i] * mult3
+    expansion_green = [False] * n
+    trend = 0
+    for i in range(n):
+        if i == 0 or u3[i] is None or l3[i] is None or u3[i-1] is None or l3[i-1] is None:
+            expansion_green[i] = trend == 1
+            continue
+        if closes[i] > u3[i] and closes[i-1] <= u3[i-1]:
+            trend = 1
+        elif closes[i] < l3[i] and closes[i-1] >= l3[i-1]:
+            trend = -1
+        expansion_green[i] = trend == 1
+
+    states = []
+    latest_transition_index = None
+    for i in range(n):
+        both = bool(trend_green[i] and speed_green[i] and expansion_green[i])
+        # Existing Trend Speed green requires BOTH dynamic-trend green and positive speed.
+        ts_green = bool(trend_green[i] and speed_green[i])
+        prev_both = states[-1]["both_green"] if states else False
+        transitioned = both and not prev_both
+        if transitioned:
+            latest_transition_index = i
+        states.append({
+            "trend_speed_green": ts_green,
+            "expansion_green": bool(expansion_green[i]),
+            "both_green": both,
+            "transition": transitioned,
+            "trend_speed": trend_speed[i],
+        })
+    return {"states": states, "latest_transition_index": latest_transition_index}
