@@ -17,7 +17,7 @@ Short setups are excluded. No automatic trading is included.
 - Uses the **242-symbol `coins.txt`** supplied with the project.
 - Binance **Spot** public market data only.
 - Closed candles are used for signal confirmation.
-- Supported timeframes: 5m / 15m / 1h / 4h.
+- Supported timeframes: 5m / 15m / 1h / 4h / 1d.
 - Browser-driven batches prevent the full universe from being scanned in one Vercel invocation.
 - Optional browser auto-scan every 60 seconds while the page is open. No server cron is used.
 - Website alerts are generated for full strategy setups.
@@ -66,3 +66,6 @@ Added `TWO_GREEN` as a separate strategy module. It scans the user-provided coin
 - No Pump/Dump logic is used by this strategy.
 - Auto scan remains browser/client driven at 60 seconds.
 - Telegram is optional.
+
+## Two-Green ordering
+For the TWO_GREEN strategy, results are ordered with BOTH GREEN first, then partial states, and newest signal/status time first within each state. Daily (1d) scanning is supported.

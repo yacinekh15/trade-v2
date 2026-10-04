@@ -48,7 +48,18 @@ def run_scan(symbols, timeframe, strategy="ALL", candle_lookback=280, minimum_li
             results.extend(scan_symbol(symbol, exec_tf, data, key, trend_candles.get(symbol)))
 
     signals = [r for r in results if r.get("signal")]
-    results.sort(key=lambda r: (not r.get("signal"), -r.get("score", 0), r.get("symbol", ""), r.get("setup_type", "")))
+    if strategy == "TWO_GREEN":
+        # For the two-indicator strategy, newest status/signal first.
+        # Both-green signals are always above partial/non-green states.
+        def _tg_key(r):
+            status_rank = {"BOTH GREEN": 0, "TREND SPEED ONLY": 1, "EXPANSION BANDS ONLY": 2, "NEITHER GREEN": 3, "ERROR": 4}
+            ts = r.get("signal_time") or r.get("updated_at") or 0
+            try: ts = int(ts)
+            except Exception: ts = 0
+            return (status_rank.get(r.get("status"), 9), -ts, r.get("symbol", ""))
+        results.sort(key=_tg_key)
+    else:
+        results.sort(key=lambda r: (not r.get("signal"), -r.get("score", 0), r.get("symbol", ""), r.get("setup_type", "")))
     return {"results": results, "signals": signals, "failed": failed, "skipped": skipped,
             "liquidity_error": liquidity_error, "scanned_count": len(symbols),
             "analyzed_count": len(candle_sets.get(timeframe, {}))}

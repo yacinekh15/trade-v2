@@ -3,7 +3,7 @@ import os
 
 BINANCE_BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://data-api.binance.vision")
 COINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coins.txt")
-TIMEFRAMES = ["5m", "15m", "1h", "4h"]
+TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 DEFAULT_TIMEFRAME = "1h"
 CANDLE_LOOKBACK = int(os.environ.get("CANDLE_LOOKBACK", "280"))
 LIQUIDITY_MIN_USDT = float(os.environ.get("LIQUIDITY_MIN_USDT", "5000000"))
