@@ -4,7 +4,7 @@ ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__)));sys.path.insert
 from fastapi import FastAPI,Header,HTTPException,Query
 from config import *
 from scanner import run_scan,STRATEGIES
-from telegram_alerts import alert_signals
+from telegram_alerts import alert_signals, send_message
 from upstash_client import get_json,set_json,configured as upstash_configured
 from binance_data import get_klines
 
@@ -105,6 +105,24 @@ async def candles(symbol:str,timeframe:str="1h",limit:int=280):
 
 @app.get("/api/coins")
 async def coins(): return {"name":"user-provided coin universe","count":len(load_coins()),"coins":load_coins()}
+
+class KdrxTelegramAlert(BaseModel):
+    symbol: str
+    timeframe: str
+    event_type: str
+    message: str
+    enabled: bool = False
+
+@app.post("/api/kdrx/telegram-alert")
+async def kdrx_telegram_alert(alert: KdrxTelegramAlert):
+    setting = _load("settings:telegram", {"enabled": TELEGRAM_ENABLED_DEFAULT}) or {}
+    if not alert.enabled or not setting.get("enabled", TELEGRAM_ENABLED_DEFAULT):
+        return {"ok": True, "sent": False, "reason": "Telegram disabled"}
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return {"ok": True, "sent": False, "reason": "Telegram not configured"}
+    msg = (f"KDRX V1 • {alert.event_type}\n{alert.symbol} | {alert.timeframe}\n"
+           f"{alert.message}\n\nScanner only — manually verify the chart.")
+    return {"ok": True, "sent": bool(send_message(msg))}
 
 class PaperTrade(BaseModel):
     symbol: str

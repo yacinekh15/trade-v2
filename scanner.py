@@ -9,6 +9,7 @@ GENERIC_STRATEGIES = [
     "BB_PULLBACK",
     "KIJUN_SSL",
     "TWO_GREEN",
+    "KDRX_V1",
 ]
 
 
@@ -58,6 +59,8 @@ def run_scan(symbols, timeframe, strategy="ALL", candle_lookback=280, minimum_li
             except Exception: ts = 0
             return (0 if ts else 1, -ts, r.get("symbol", ""))
         results.sort(key=_tg_key)
+    elif strategy == "KDRX_V1":
+        results.sort(key=lambda r: (-int(r.get("match_count", 0)), -int(r.get("signal_time") or 0), r.get("symbol", "")))
     else:
         results.sort(key=lambda r: (not r.get("signal"), -r.get("score", 0), r.get("symbol", ""), r.get("setup_type", "")))
     return {"results": results, "signals": signals, "failed": failed, "skipped": skipped,

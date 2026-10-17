@@ -15,6 +15,7 @@ from indicators_engine import (
     ema_relationship, compute_trend_speed_analyzer, compute_adaptive_expansion,
     compute_two_green_transition,
 )
+from kdrx_context import build_kdrx_context
 from config import (
     DIVERGENCE_MAX_SPACING, DIVERGENCE_MIN_RSI_DELTA, DIVERGENCE_MIN_SPACING,
     DIVERGENCE_P1_RSI_MAX, DIVERGENCE_USE_P1_RSI_FILTER, EMA_EQUAL_TOLERANCE_PCT,
@@ -27,6 +28,7 @@ STRATEGIES = {
     "BB_PULLBACK": "Bollinger Pullback + EMA200",
     "KIJUN_SSL": "Kijun-sen + SSL Channel",
     "TWO_GREEN": "Two Indicators — Both Green",
+    "KDRX_V1": "KDRX V1 — Pullback Match",
 }
 
 
@@ -77,9 +79,14 @@ def _context(candles):
     elif vr >= 1.0: score += 5
     if 40 <= rsi[i] <= 70: score += 10
     if resistance and price >= resistance: score += 10
+    kdrx_context = build_kdrx_context(
+        price=price, ema20=e20[i], ema50=e50[i], ema200=e200[i], rsi=rsi[i],
+        volume_ratio=vr, support=support, resistance=resistance,
+    )
     return {
         "price": _r(price),
         "signal_time": candles[i].get("close_time", candles[i].get("open_time")),
+        "kdrx_context": kdrx_context,
         "indicators": {
             "rsi": _r(rsi[i], 2), "ema20": _r(e20[i]), "ema50": _r(e50[i]),
             "ema200": _r(e200[i]), "ema_gap_pct": _r(gap, 4),
@@ -339,6 +346,54 @@ def two_green(symbol, timeframe, candles):
         "indicator_2": {"name": "Adaptive Trend Expansion Bands", "green": ae_green},
     })
 
+
+def kdrx_v1(symbol, timeframe, candles):
+    """KDRX V1 exploratory match scanner. All five conditions are equally weighted."""
+    if len(candles) < 220:
+        return None
+    ctx = _context(candles)
+    if not ctx:
+        return None
+    i = len(candles) - 1
+    price = float(candles[i]["close"])
+    ind = ctx["indicators"]
+    e20, e50, e200, rsi = ind.get("ema20"), ind.get("ema50"), ind.get("ema200"), ind.get("rsi")
+    values = [e20, e50, e200, rsi]
+    # A missing indicator is unavailable, not a failed condition.
+    c1 = None if e50 is None or e200 is None else e50 > e200
+    c2 = None if e50 is None or e200 is None else price > e50 and price > e200
+    c3 = None if e20 is None else price <= e20
+    c4 = None if rsi is None else 45 <= rsi <= 55
+    c5 = None if e200 is None or e200 == 0 else 0 <= (price - e200) / e200 * 100 <= 3
+    specs = [
+        ("ema50_above_ema200", c1, "EMA50 is above EMA200", f"EMA50 {e50:.8g} vs EMA200 {e200:.8g}" if e50 is not None and e200 is not None else "EMA data unavailable"),
+        ("price_above_ema50_ema200", c2, "Price is above both EMA50 and EMA200", f"Price {price:.8g}; EMA50 {e50:.8g}; EMA200 {e200:.8g}" if e50 is not None and e200 is not None else "EMA data unavailable"),
+        ("price_at_or_below_ema20", c3, "Price is at or below EMA20", f"Price {price:.8g}; EMA20 {e20:.8g}" if e20 is not None else "EMA20 unavailable"),
+        ("rsi_45_55", c4, "RSI is between 45 and 55", f"RSI {rsi:.2f}" if rsi is not None else "RSI unavailable"),
+        ("price_0_3pct_above_ema200", c5, "Price is 0–3% above EMA200", f"Distance {(price-e200)/e200*100:.2f}%" if e200 else "EMA200 unavailable"),
+    ]
+    conditions = []
+    matched = available = 0
+    for name, passed, label, detail in specs:
+        if passed is not None:
+            available += 1
+            if passed: matched += 1
+        state = "UNAVAILABLE" if passed is None else ("PASS" if passed else "MISS")
+        conditions.append({"name": name, "passed": passed, "state": state, "text": label, "detail": detail})
+    score = matched * 20
+    complete = available == 5
+    signal = complete and matched == 5
+    kc = ctx.get("kdrx_context", {})
+    return _base(symbol, timeframe, "KDRX_V1", ctx, conditions, signal=signal,
+        status=("MATCH 5/5" if signal else f"MATCH {matched}/5"), extra={
+            "score": score, "match_count": matched, "available_conditions": available,
+            "complete_evaluation": complete, "entry_reference": _r(price),
+            "signal_time": candles[i].get("close_time", candles[i].get("open_time")),
+            "kdrx_context": kc,
+            "status_text": f"{matched}/5 conditions match" + ("" if complete else f"; {5-available} unavailable"),
+            "reasons": [f"{label}: {state}" for (name, passed, label, detail), state in zip(specs, [c["state"] for c in conditions])],
+        })
+
 def scan_symbol(symbol,timeframe,candles,strategy="ALL",trend_candles=None):
     funcs={
         "EMA200_CROSS":ema200_cross,
@@ -347,6 +402,7 @@ def scan_symbol(symbol,timeframe,candles,strategy="ALL",trend_candles=None):
         "BB_PULLBACK":bb_pullback,
         "KIJUN_SSL":kijun_ssl,
         "TWO_GREEN":two_green,
+        "KDRX_V1":kdrx_v1,
     }
     keys=list(funcs) if strategy=="ALL" else [strategy]
     out=[]
